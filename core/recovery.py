@@ -1,7 +1,8 @@
 import time
-import os
 from enum import Enum
 from typing import Callable, Any, Optional
+
+from core.config import get_int
 
 
 class ErrorCategory(str, Enum):
@@ -30,10 +31,7 @@ def classify_exception(exc: Exception) -> ErrorCategory:
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return max(1, int(os.getenv(name, str(default))))
-    except ValueError:
-        return default
+    return get_int("browser.retries", default, env=name, minimum=1)
 
 
 def retry_action(max_retries: Optional[int] = 3, backoff: float = 0.5):

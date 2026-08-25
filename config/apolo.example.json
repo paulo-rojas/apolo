@@ -1,0 +1,52 @@
+{
+  "browser": {
+    "profile": "%USERPROFILE%\\.apolo-profile",
+    "profile_directory": null,
+    "cdp_endpoint": null,
+    "headless": false,
+    "retries": 3,
+    "timeout_ms": 15000,
+    "navigation_timeout_ms": 15000,
+    "require_configured": false,
+    "selected": "edge",
+    "executables": {
+      "edge": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "chrome": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "brave": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"
+    }
+  },
+  "music": {
+    "search_timeout_seconds": 5,
+    "action_timeout_seconds": 5,
+    "verify_retries": 5,
+    "verify_delay_seconds": 0.7
+  },
+  "voice": {
+    "session_timeout_seconds": 20,
+    "min_confidence": 0.45,
+    "min_duration_ms": 250,
+    "vad": {
+      "sample_rate": 16000,
+      "threshold": 0.015,
+      "silence_ms": 700,
+      "max_utterance_ms": 8000
+    }
+  },
+  "whisper": {
+    "executable": "C:\\ruta\\a\\whisper-cli.exe",
+    "model": "large-v3",
+    "model_path": "C:\\ruta\\a\\models\\ggml-large-v3.bin",
+    "language": "es",
+    "prompt": "Apolo. Comandos de voz en español para música: pon, reproduce, pausa, continua, siguiente, anterior, esa no, que suena."
+  },
+  "codex": {
+    "enabled": false,
+    "executable": "codex",
+    "model": null,
+    "timeout_seconds": 30,
+    "sandbox": "read-only",
+    "approval": "never",
+    "cwd": "C:\\apolo",
+    "auto_execute_tools": false
+  }
+}

@@ -1,8 +1,11 @@
+import asyncio
 import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.config import get_bool, get_int, get_str
+from .executable_resolver import resolve_browser_executable
 from .selector_utils import find_by_accessibility, simple_text_locator_candidates
 from core.recovery import retry_action, classify_exception, ErrorCategory
 
@@ -18,6 +21,14 @@ class PlaywrightNotInstalled(RuntimeError):
     pass
 
 
+class BrowserProfileInUse(RuntimeError):
+    pass
+
+
+class BrowserCdpUnavailable(RuntimeError):
+    pass
+
+
 class PlaywrightBrowser:
     """Playwright-based browser wrapper with accessibility-first search and retries.
 
@@ -28,12 +39,30 @@ class PlaywrightBrowser:
     def __init__(self, user_data_dir: Optional[str] = None, headless: Optional[bool] = None):
         self.user_data_dir = (
             user_data_dir
-            or os.getenv("APOLO_BROWSER_PROFILE")
+            or get_str("browser.profile", env="APOLO_BROWSER_PROFILE")
             or str(Path.home() / ".apolo-profile")
         )
-        self.headless = self._env_bool("APOLO_BROWSER_HEADLESS", True) if headless is None else headless
+        self.user_data_dir = os.path.expandvars(self.user_data_dir)
+        self.profile_directory = get_str(
+            "browser.profile_directory", env="APOLO_BROWSER_PROFILE_DIRECTORY"
+        )
+        self.cdp_endpoint = get_str(
+            "browser.cdp_endpoint", env="APOLO_BROWSER_CDP_ENDPOINT"
+        )
+        self.headless = get_bool("browser.headless", True, env="APOLO_BROWSER_HEADLESS") if headless is None else headless
+        self.executable_path = resolve_browser_executable()
+        self.default_timeout_ms = get_int(
+            "browser.timeout_ms", 15000, env="APOLO_BROWSER_TIMEOUT_MS", minimum=1000
+        )
+        self.navigation_timeout_ms = get_int(
+            "browser.navigation_timeout_ms",
+            self.default_timeout_ms,
+            env="APOLO_BROWSER_NAVIGATION_TIMEOUT_MS",
+            minimum=1000,
+        )
         self._started = False
         self._playwright = None
+        self._browser = None
         self._context = None
         self._page = None
         self.state: Dict[str, Any] = {
@@ -44,13 +73,6 @@ class PlaywrightBrowser:
             "recentActions": [],
             "lastSelectedElement": None,
         }
-
-    @staticmethod
-    def _env_bool(name: str, default: bool) -> bool:
-        value = os.getenv(name)
-        if value is None:
-            return default
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def _ensure_started(self):
         if self._started:
@@ -63,19 +85,79 @@ class PlaywrightBrowser:
                 "playwright is not installed or browsers not available"
             ) from e
 
+        self._clear_running_loop_for_sync_playwright()
         self._playwright = sync_playwright().start()
-        self._context = self._playwright.chromium.launch_persistent_context(
-            user_data_dir=self.user_data_dir, headless=self.headless
-        )
+        if self.cdp_endpoint:
+            self._connect_over_cdp()
+            return
+
+        self._launch_persistent_context()
+
+    def _connect_over_cdp(self):
+        try:
+            self._browser = self._playwright.chromium.connect_over_cdp(
+                self.cdp_endpoint,
+                timeout=self.default_timeout_ms,
+            )
+        except Exception as e:
+            raise BrowserCdpUnavailable(
+                "Brave no esta exponiendo CDP en "
+                f"{self.cdp_endpoint}. Cierra Brave completo y abrelo con "
+                "--remote-debugging-port=9222."
+            ) from e
+        contexts = self._browser.contexts
+        self._context = contexts[0] if contexts else self._browser.new_context()
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
+        self._context.set_default_timeout(self.default_timeout_ms)
+        self._context.set_default_navigation_timeout(self.navigation_timeout_ms)
         self._started = True
 
+    def _launch_persistent_context(self):
+        launch_options = {
+            "user_data_dir": self.user_data_dir,
+            "headless": self.headless,
+            "timeout": self.default_timeout_ms,
+        }
+        if self.profile_directory:
+            launch_options["args"] = [f"--profile-directory={self.profile_directory}"]
+        if self.executable_path:
+            launch_options["executable_path"] = self.executable_path
+        try:
+            self._context = self._playwright.chromium.launch_persistent_context(
+                **launch_options
+            )
+        except Exception as e:
+            if "Opening in existing browser session" in str(e):
+                raise BrowserProfileInUse(
+                    "El perfil del navegador ya esta en uso. Cierra ese navegador "
+                    "antes de usar este perfil con Apolo, o inicia Brave con "
+                    "--remote-debugging-port y configura browser.cdp_endpoint."
+                ) from e
+            raise
+        pages = self._context.pages
+        self._page = pages[0] if pages else self._context.new_page()
+        self._context.set_default_timeout(self.default_timeout_ms)
+        self._context.set_default_navigation_timeout(self.navigation_timeout_ms)
+        self._started = True
+
+    @staticmethod
+    def _clear_running_loop_for_sync_playwright():
+        # Uvicorn/Python 3.14 can leave a running loop marker on this sync worker.
+        # Playwright's sync API is safe here because browser calls run off the app loop.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if loop.is_running():
+            asyncio.events._set_running_loop(None)
+
     @retry_action(max_retries=None, backoff=0.4)
-    def open(self, url: str, timeout: int = 30):
+    def open(self, url: str, timeout: Optional[int] = None, wait_until: str = "domcontentloaded"):
         self._ensure_started()
         try:
-            self._page.goto(url, timeout=timeout * 1000)
+            timeout_ms = int(timeout * 1000) if timeout is not None else self.navigation_timeout_ms
+            self._page.goto(url, timeout=timeout_ms, wait_until=wait_until)
             # brief stabilization
             time.sleep(0.15)
             self._update_state("open")
@@ -86,6 +168,9 @@ class PlaywrightBrowser:
     def get_state(self) -> Dict[str, Any]:
         self._ensure_started()
         self._update_state("get_state")
+        return dict(self.state)
+
+    def snapshot_state(self) -> Dict[str, Any]:
         return dict(self.state)
 
     def find(self, text: str, max_results: int = 5) -> Dict[str, Any]:
@@ -248,6 +333,20 @@ class PlaywrightBrowser:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def close(self):
+        if self._context and not self._browser:
+            self._context.close()
+        if self._browser:
+            self._browser.close()
+        if self._playwright:
+            self._playwright.stop()
+        self._started = False
+        self._context = None
+        self._page = None
+        self._browser = None
+        self._playwright = None
+        return {"ok": True}
 
     def _update_state(self, action: str):
         try:
