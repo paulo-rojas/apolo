@@ -185,6 +185,7 @@ def test_start_browser_routes_to_cdp_ensure():
 def test_volume_intent_resolves_without_arbitrary_tool_execution():
     volume = route_command("sube el volumen").as_dict()
     level = route_command("sube el volumen a 50").as_dict()
+    spoken_level = route_command("baja el volumen a treinta").as_dict()
 
     assert volume["kind"] == "mcp"
     assert volume["tool"] == "system.set_volume"
@@ -193,6 +194,9 @@ def test_volume_intent_resolves_without_arbitrary_tool_execution():
     assert level["kind"] == "mcp"
     assert level["tool"] == "system.set_volume"
     assert level["interpretation"]["entities"] == {"level": 50}
+    assert spoken_level["kind"] == "mcp"
+    assert spoken_level["tool"] == "system.set_volume"
+    assert spoken_level["interpretation"]["entities"] == {"level": 30}
 
 
 def test_same_artist_uses_temporary_context(tmp_path):

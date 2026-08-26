@@ -369,11 +369,16 @@ class DeterministicIntentResolver:
                 return InterpretedCommand(raw_text, normalized_text, "browser_click", {"target": target}, 0.88)
         if normalized_text in COMMON_BROWSER_BUTTONS:
             return InterpretedCommand(raw_text, normalized_text, "browser_click", {"target": normalized_text}, 0.86)
-        volume = re.match(r"^(?:sube|baja|pon|fija|cambia)(?:\s+el)?\s+volumen(?:\s+a\s+(\d{1,3}))?$", normalized_text)
+        volume = re.match(
+            r"^(?:sube|baja|pon|fija|cambia)(?:\s+el)?\s+volumen(?:\s+a\s+([a-z0-9 ]+))?$",
+            normalized_text,
+        )
         if volume:
             entities: Dict[str, Any] = {}
             if volume.group(1):
-                entities["level"] = min(100, max(0, int(volume.group(1))))
+                level = _parse_volume_level(volume.group(1))
+                if level is not None:
+                    entities["level"] = min(100, max(0, level))
             direction = normalized_text.split()[0]
             if direction in {"sube", "baja"} and not entities:
                 entities["direction"] = "up" if direction == "sube" else "down"
@@ -479,7 +484,7 @@ class DeterministicIntentResolver:
         open_match = re.match(r"^(?:abre|abrir|entra|entrar)\s+(?:la\s+pagina\s+|el\s+sitio\s+|la\s+web\s+)?(.+)$", normalized_text)
         if not open_match:
             return None
-        target = open_match.group(1).strip()
+        target = _drop_leading_article(open_match.group(1).strip())
         if known_app_alias(target):
             return None
         if known_web_alias(target) or "." in target or len(target.split()) == 1:
@@ -720,6 +725,32 @@ def _clean_music_artist(artist: str) -> str:
     artist = _clean_music_query(artist)
     artist = re.sub(r"\s+en\s+(?:youtube|youtube music|ytmusic)$", "", artist)
     return " ".join(artist.split())
+
+
+def _parse_volume_level(text: str) -> Optional[int]:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    number_words = {
+        "cero": 0,
+        "diez": 10,
+        "veinte": 20,
+        "treinta": 30,
+        "cuarenta": 40,
+        "cincuenta": 50,
+        "sesenta": 60,
+        "setenta": 70,
+        "ochenta": 80,
+        "noventa": 90,
+        "cien": 100,
+    }
+    return number_words.get(value)
+
+
+def _drop_leading_article(text: str) -> str:
+    return re.sub(r"^(?:el|la|los|las)\s+", "", str(text or "").strip())
 
 
 def _split_music_platform(text: str) -> tuple[str, str]:

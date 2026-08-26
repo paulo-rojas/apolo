@@ -29,10 +29,28 @@ def test_apolo_v2_wake_word_routes_fast_path(tmp_path):
     assert result["tool"] == "youtube_music.pause"
 
 
+def test_continua_replacement_character_asr_variant_routes_fast_path(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    result = gateway.handle_transcript("Apolo contin a.", confidence=0.9, duration_ms=900)
+
+    assert result["kind"] == "mcp"
+    assert result["tool"] == "youtube_music.resume"
+
+
 def test_apolo_siguiente_routes_fast_path(tmp_path):
     gateway = VoiceGateway(State(str(tmp_path / "state.db")))
 
     result = gateway.handle_transcript("Apolo siguiente")
+
+    assert result["kind"] == "mcp"
+    assert result["tool"] == "youtube_music.next"
+
+
+def test_apolo_siguiente_accion_asr_variant_routes_fast_path(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    result = gateway.handle_transcript("Apolo, siguiente acción.")
 
     assert result["kind"] == "mcp"
     assert result["tool"] == "youtube_music.next"
@@ -252,6 +270,7 @@ def test_short_garbled_wake_command_requests_repeat(tmp_path):
 
     assert result["kind"] == "repeat"
     assert result["reason"] == "command not understood"
+    assert result["followup"]["wake_required"] is False
 
 
 def test_garbled_de_artist_wake_command_does_not_open_music(tmp_path):
@@ -307,6 +326,29 @@ def test_unclear_wake_attempt_requests_repeat(tmp_path):
 
     assert result["kind"] == "repeat"
     assert result["feedback"] == "repeat"
+    assert result["followup"]["wake_required"] is False
+
+
+def test_repeat_arms_followup_without_wake_word(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    repeat = gateway.handle_transcript("Hola, por lo muchas")
+    followup = gateway.handle_transcript("pausa")
+
+    assert repeat["kind"] == "repeat"
+    assert followup["kind"] == "mcp"
+    assert followup["tool"] == "youtube_music.pause"
+
+
+def test_unclear_wake_command_arms_followup_without_wake_word(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    repeat = gateway.handle_transcript("Hola Apolo de alble.")
+    followup = gateway.handle_transcript("continua")
+
+    assert repeat["kind"] == "repeat"
+    assert followup["kind"] == "mcp"
+    assert followup["tool"] == "youtube_music.resume"
 
 
 def test_unknown_wake_command_falls_back_to_codex(tmp_path):
@@ -354,6 +396,26 @@ def test_volume_asr_variant_routes_local(tmp_path):
     assert result["kind"] == "mcp"
     assert result["tool"] == "system.set_volume"
     assert result["args"] == {"direction": "down"}
+
+
+def test_sube_volume_asr_variant_routes_local(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    result = gateway.handle_transcript("Apolo suele volumen.")
+
+    assert result["kind"] == "mcp"
+    assert result["tool"] == "system.set_volume"
+    assert result["args"] == {"direction": "up"}
+
+
+def test_web_open_drops_article_from_browser_name(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    result = gateway.handle_transcript("Apolo, abre el Firefox.")
+
+    assert result["kind"] == "mcp"
+    assert result["tool"] == "web.open"
+    assert result["args"] == {"target": "firefox"}
 
 
 def test_browser_click_button_routes_without_codex(tmp_path):

@@ -4,7 +4,7 @@ from core.audio_gate import computer_audio_guard_active
 from core.config import get_float, get_int
 from core.logging import write_log
 from .command_router import route_command
-from .session import VoiceSession
+from .session import VoiceSession, voice_session_timeout_seconds
 from .wake_word import likely_wake_attempt, strip_wake_word
 
 
@@ -42,27 +42,15 @@ class VoiceGateway:
             self.session.touch()
         else:
             if likely_wake_attempt(transcript):
-                return self._record("repeat", transcript, reason="wake word unclear", feedback="repeat")
+                return self._record_repeat(transcript, reason="wake word unclear")
             return self._record("ignore", transcript, reason="wake word not detected")
 
         routed = route_command(command, state=self.state)
         if routed.kind == "ignore" and wake.detected:
             if wake.matched in {"por lo", "hola por lo"}:
-                return self._record(
-                    "repeat",
-                    transcript,
-                    command=command,
-                    reason="wake word unclear",
-                    feedback="repeat",
-                )
+                return self._record_repeat(transcript, command=command, reason="wake word unclear")
             if _should_repeat_unclear_wake_command(command):
-                return self._record(
-                    "repeat",
-                    transcript,
-                    command=command,
-                    reason="command not understood",
-                    feedback="repeat",
-                )
+                return self._record_repeat(transcript, command=command, reason="command not understood")
             return self._record(
                 "codex",
                 transcript,
@@ -119,6 +107,14 @@ class VoiceGateway:
             self.state.set("lastCommand", extra.get("command"))
             self.state.set("voiceSession", self.session.get())
         return result
+
+    def _record_repeat(self, transcript: str, **extra) -> Dict[str, Any]:
+        self.session.activate()
+        followup = {
+            "wake_required": False,
+            "timeout_seconds": voice_session_timeout_seconds(),
+        }
+        return self._record("repeat", transcript, feedback="repeat", followup=followup, **extra)
 
 
 def _feedback_for_route(kind: str) -> str:
