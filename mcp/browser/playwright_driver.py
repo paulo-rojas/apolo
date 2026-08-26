@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -36,7 +37,12 @@ class PlaywrightBrowser:
     and screenshot+OCR fallback when available.
     """
 
-    def __init__(self, user_data_dir: Optional[str] = None, headless: Optional[bool] = None):
+    def __init__(
+        self,
+        user_data_dir: Optional[str] = None,
+        headless: Optional[bool] = None,
+        force_launch: bool = False,
+    ):
         self.user_data_dir = (
             user_data_dir
             or get_str("browser.profile", env="APOLO_BROWSER_PROFILE")
@@ -46,7 +52,7 @@ class PlaywrightBrowser:
         self.profile_directory = get_str(
             "browser.profile_directory", env="APOLO_BROWSER_PROFILE_DIRECTORY"
         )
-        self.cdp_endpoint = get_str(
+        self.cdp_endpoint = None if force_launch else get_str(
             "browser.cdp_endpoint", env="APOLO_BROWSER_CDP_ENDPOINT"
         )
         self.headless = get_bool("browser.headless", True, env="APOLO_BROWSER_HEADLESS") if headless is None else headless
@@ -292,6 +298,165 @@ class PlaywrightBrowser:
         self._update_state("type")
         return {"ok": True}
 
+    def dom_snapshot(self, max_elements: int = 40) -> Dict[str, Any]:
+        self._ensure_started()
+        elements = self._page.evaluate(
+            """
+            (maxElements) => {
+                const selectorFor = (el) => {
+                    if (el.id) return `#${CSS.escape(el.id)}`;
+                    const data = ['data-testid', 'data-test', 'name', 'aria-label']
+                        .map((attr) => [attr, el.getAttribute(attr)])
+                        .find(([, value]) => value);
+                    if (data) return `${el.tagName.toLowerCase()}[${data[0]}="${CSS.escape(data[1])}"]`;
+                    const parent = el.parentElement;
+                    if (!parent) return el.tagName.toLowerCase();
+                    const index = Array.from(parent.children).indexOf(el) + 1;
+                    return `${el.tagName.toLowerCase()}:nth-child(${index})`;
+                };
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = window.getComputedStyle(el);
+                    return rect.width > 2 && rect.height > 2 &&
+                        style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const nodes = Array.from(document.querySelectorAll(
+                    'a, button, input, textarea, select, [role="button"], [contenteditable="true"]'
+                )).filter(visible).slice(0, maxElements);
+                return nodes.map((el, index) => ({
+                    index,
+                    tag: el.tagName.toLowerCase(),
+                    role: el.getAttribute('role') || '',
+                    text: (el.innerText || el.value || el.textContent || '').trim().slice(0, 160),
+                    aria: el.getAttribute('aria-label') || '',
+                    placeholder: el.getAttribute('placeholder') || '',
+                    href: el.href || '',
+                    selector: selectorFor(el)
+                }));
+            }
+            """,
+            max_elements,
+        )
+        self.state["visibleElements"] = elements
+        self._update_state("dom_snapshot")
+        return {"url": self._page.url, "title": self._page.title(), "elements": elements}
+
+    def dom_click(self, target: str = "", index: Optional[int] = None, selector: str = "") -> Dict[str, Any]:
+        self._ensure_started()
+        if selector:
+            self._page.locator(selector).first.click()
+            self._update_state("dom_click")
+            return {"ok": True, "selector": selector}
+        if index is not None:
+            snapshot = self.dom_snapshot(max_elements=max(index + 1, 40))
+            elements = snapshot.get("elements", [])
+            if index < 0 or index >= len(elements):
+                raise IndexError("element index out of range")
+            selector = elements[index]["selector"]
+            self._page.locator(selector).first.click()
+            self._update_state("dom_click")
+            return {"ok": True, "index": index, "selector": selector}
+        if not target:
+            raise ValueError("target, index, or selector is required")
+        clicked = self._page.evaluate(
+            """
+            (target) => {
+                const needle = target.toLowerCase();
+                const nodes = Array.from(document.querySelectorAll(
+                    'a, button, [role="button"], input[type="button"], input[type="submit"]'
+                ));
+                const node = nodes.find((el) => {
+                    const value = [
+                        el.innerText,
+                        el.textContent,
+                        el.value,
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title')
+                    ].filter(Boolean).join(' ').toLowerCase();
+                    return value.includes(needle);
+                });
+                if (!node) return false;
+                node.click();
+                return true;
+            }
+            """,
+            target,
+        )
+        if not clicked:
+            raise ValueError(f"DOM target not found: {target}")
+        self._update_state("dom_click")
+        return {"ok": True, "target": target}
+
+    def smart_click(self, target: str = "", max_elements: int = 80, min_score: float = 0.45) -> Dict[str, Any]:
+        self._ensure_started()
+        target = " ".join(str(target or "").split())
+        if not target:
+            raise ValueError("target is required")
+        snapshot = self.dom_snapshot(max_elements=max_elements)
+        ranked = sorted(
+            (
+                (_element_match_score(target, element), index, element)
+                for index, element in enumerate(snapshot.get("elements", []))
+                if _element_is_clickable(element)
+            ),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+        if not ranked or ranked[0][0] < min_score:
+            raise ValueError(f"DOM target not found: {target}")
+        score, index, element = ranked[0]
+        selector = element.get("selector")
+        if not selector:
+            raise ValueError(f"DOM target has no selector: {target}")
+        self._page.locator(selector).first.click()
+        self.state["lastSelectedElement"] = {
+            "target": target,
+            "index": index,
+            "score": score,
+            "text": element.get("text", ""),
+            "aria": element.get("aria", ""),
+            "selector": selector,
+        }
+        self._update_state("smart_click")
+        return {
+            "ok": True,
+            "target": target,
+            "index": index,
+            "score": round(score, 3),
+            "selector": selector,
+            "element": {
+                "tag": element.get("tag", ""),
+                "role": element.get("role", ""),
+                "text": element.get("text", ""),
+                "aria": element.get("aria", ""),
+            },
+        }
+
+    def dom_type(self, text: str, target: str = "", selector: str = "", submit: bool = False) -> Dict[str, Any]:
+        self._ensure_started()
+        locator = None
+        if selector:
+            locator = self._page.locator(selector).first
+        elif target:
+            try:
+                candidate = self._page.get_by_placeholder(target)
+                locator = candidate.first if candidate.count() else None
+            except Exception:
+                locator = None
+        if locator is None:
+            locator = self._page.locator('input:not([type="hidden"]), textarea, [contenteditable="true"]').first
+        locator.fill(text)
+        if submit:
+            locator.press("Enter")
+        self._update_state("dom_type")
+        return {"ok": True, "text": text, "submitted": submit}
+
+    def dom_press(self, key: str) -> Dict[str, Any]:
+        self._ensure_started()
+        self._page.keyboard.press(key)
+        self._update_state("dom_press")
+        return {"ok": True, "key": key}
+
     def scroll(self, direction: str = "down", amount: int = 400):
         self._ensure_started()
         if direction == "down":
@@ -355,3 +520,42 @@ class PlaywrightBrowser:
         except Exception:
             pass
         self.state["recentActions"].append({"action": action, "ts": time.time()})
+
+
+def _element_is_clickable(element: Dict[str, Any]) -> bool:
+    tag = str(element.get("tag") or "").lower()
+    role = str(element.get("role") or "").lower()
+    return tag in {"a", "button", "input"} or role == "button" or bool(element.get("href"))
+
+
+def _element_match_score(target: str, element: Dict[str, Any]) -> float:
+    target_norm = _norm_match_text(target)
+    labels = [
+        element.get("text", ""),
+        element.get("aria", ""),
+        element.get("placeholder", ""),
+        element.get("href", ""),
+    ]
+    return max((_text_match_score(target_norm, _norm_match_text(str(label or ""))) for label in labels), default=0.0)
+
+
+def _text_match_score(target: str, label: str) -> float:
+    if not target or not label:
+        return 0.0
+    if target == label:
+        return 1.0
+    if target in label:
+        return min(0.95, len(target) / max(len(label), 1) + 0.35)
+    target_tokens = set(target.split())
+    label_tokens = set(label.split())
+    if not target_tokens or not label_tokens:
+        return 0.0
+    overlap = len(target_tokens & label_tokens) / len(target_tokens | label_tokens)
+    return max(0.55, overlap) if overlap else 0.0
+
+
+def _norm_match_text(text: str) -> str:
+    cleaned = str(text or "").lower()
+    cleaned = re.sub(r"[_\-]+", " ", cleaned)
+    cleaned = re.sub(r"[^a-z0-9áéíóúüñ\s]", " ", cleaned)
+    return " ".join(cleaned.split())

@@ -3,7 +3,7 @@ VOICE_PAGE_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Apolo Voz</title>
+  <title>apolov2 Voz</title>
   <style>
     :root { color-scheme: dark; font-family: Segoe UI, system-ui, sans-serif; }
     body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101114; color: #f6f7f9; }
@@ -19,7 +19,7 @@ VOICE_PAGE_HTML = """<!doctype html>
 </head>
 <body>
   <main>
-    <h1>Apolo Voz</h1>
+    <h1>apolov2 Voz</h1>
     <div class="panel">
       <p class="muted">Di algo como: "pon Everlong Foo Fighters la original", "esa no", "pausa" o "que suena".</p>
       <button id="listen">Escuchar</button>

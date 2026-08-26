@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from core.config import get_bool, get_int, get_str
+from core.process import hidden_subprocess_kwargs
 from .executable_resolver import resolve_browser_executable
 
 
@@ -87,7 +88,8 @@ def close_browser_processes(
         "Where-Object { $_.MainWindowHandle -ne 0 } | "
         "ForEach-Object { $_.CloseMainWindow() | Out-Null }"
     )
-    runner(
+    _run_hidden(
+        runner,
         ["powershell", "-NoProfile", "-Command", close_script],
         capture_output=True,
         text=True,
@@ -96,7 +98,8 @@ def close_browser_processes(
         check=False,
     )
     time.sleep(grace_seconds)
-    runner(
+    _run_hidden(
+        runner,
         ["taskkill", "/IM", f"{process_name}.exe", "/T", "/F"],
         capture_output=True,
         text=True,
@@ -119,7 +122,19 @@ def start_browser_with_cdp(
         args.append(f"--profile-directory={profile_directory}")
     if restore_last_session:
         args.append("--restore-last-session")
-    popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _popen_hidden(popen, args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _run_hidden(runner: Callable[..., Any], args: list[str], **kwargs) -> Any:
+    if runner is subprocess.run:
+        kwargs.update(hidden_subprocess_kwargs())
+    return runner(args, **kwargs)
+
+
+def _popen_hidden(popen: Callable[..., Any], args: list[str], **kwargs) -> Any:
+    if popen is subprocess.Popen:
+        kwargs.update(hidden_subprocess_kwargs())
+    return popen(args, **kwargs)
 
 
 def cdp_port(endpoint: str) -> int:

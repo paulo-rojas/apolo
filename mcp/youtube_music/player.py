@@ -40,6 +40,22 @@ def _env_float(name: str, default: float) -> float:
     return get_float(paths.get(name, name), default, env=name, minimum=0.1)
 
 
+def _min_auto_score() -> float:
+    return get_float(
+        "music.min_auto_score",
+        0.35,
+        env="APOLO_MUSIC_MIN_AUTO_SCORE",
+        minimum=0.0,
+    )
+
+
+def _candidate_score(candidate: Dict[str, Any]) -> Optional[float]:
+    try:
+        return float(candidate.get("score"))
+    except (TypeError, ValueError):
+        return None
+
+
 def title_similarity(a: str, b: str) -> float:
     a = a.lower()
     b = b.lower()
@@ -432,8 +448,25 @@ class YouTubeMusic:
         if not candidates:
             return {"ok": False, "error": "no candidates found"}
 
+        indexed_candidates = list(enumerate(candidates))
+        if query is not None:
+            min_score = _min_auto_score()
+            indexed_candidates = [
+                (index, cand)
+                for index, cand in indexed_candidates
+                if (_candidate_score(cand) is None or _candidate_score(cand) >= min_score)
+            ]
+            if not indexed_candidates:
+                return {
+                    "ok": False,
+                    "error": "low confidence music candidate",
+                    "query": query,
+                    "min_score": min_score,
+                    "best_candidate": candidates[0],
+                }
+
         tries = 0
-        for index, cand in enumerate(candidates):
+        for index, cand in indexed_candidates:
             if time.monotonic() >= deadline:
                 return {"ok": False, "error": "music action timeout"}
             if tries >= max_tries:
@@ -450,12 +483,12 @@ class YouTubeMusic:
         page = self.browser._page
         if self._click_visible_play_button(cand.get("title", "")):
             time.sleep(0.8)
-            return self._wait_for_playback(cand, strict=False)
+            return self._wait_for_playback(cand)
 
         if self._click_candidate_by_text(cand.get("title", "")):
             time.sleep(0.6)
             self.resume()
-            return self._wait_for_playback(cand, strict=False)
+            return self._wait_for_playback(cand)
 
         try:
             items = page.locator("ytmusic-responsive-list-item-renderer")
@@ -479,21 +512,13 @@ class YouTubeMusic:
                         pass
 
             try:
-                items.nth(0).click()
-                time.sleep(0.6)
-                self.resume()
-                return self._wait_for_playback(cand, strict=False)
-            except Exception:
-                pass
-
-            try:
                 title = cand.get("title", "")
                 if not title:
                     return False
                 page.get_by_text(title, exact=True).first.click(timeout=3000)
                 time.sleep(0.6)
                 self.resume()
-                return self._wait_for_playback(cand, strict=False)
+                return self._wait_for_playback(cand)
             except Exception:
                 return False
         except Exception:
@@ -504,7 +529,7 @@ class YouTubeMusic:
                 page.get_by_text(title, exact=True).first.click(timeout=3000)
                 time.sleep(0.6)
                 self.resume()
-                return self._wait_for_playback(cand, strict=False)
+                return self._wait_for_playback(cand)
             except Exception:
                 return False
 
@@ -521,11 +546,27 @@ class YouTubeMusic:
         info = self.get_current_track()
         if not info.get("ok"):
             return False
+        expected_title = cand.get("title", "").lower()
+        expected_artist = cand.get("artist", "").lower()
+        actual_title = info.get("title", "").lower()
+        actual_artist = info.get("artist", "").lower()
         if not strict:
-            return bool(info.get("title") or info.get("artist"))
-        expected = cand.get("title", "").lower()
-        actual = info.get("title", "").lower()
-        return bool(expected and (expected in actual or actual in expected))
+            title_matches = bool(
+                expected_title and actual_title and (
+                    expected_title in actual_title or actual_title in expected_title
+                )
+            )
+            artist_matches = bool(
+                expected_artist and actual_artist and (
+                    expected_artist in actual_artist or actual_artist in expected_artist
+                )
+            )
+            return title_matches or artist_matches
+        return bool(
+            expected_title
+            and actual_title
+            and (expected_title in actual_title or actual_title in expected_title)
+        )
 
     def _click_visible_play_button(self, title: str) -> bool:
         page = self.browser._page
