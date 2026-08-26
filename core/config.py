@@ -28,6 +28,26 @@ def get_config(path: str, default: Any = None) -> Any:
     return current
 
 
+def save_config(data: Dict[str, Any]) -> None:
+    path = Path(os.getenv("APOLO_CONFIG_FILE", str(DEFAULT_CONFIG_PATH)))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def set_config(path: str, value: Any) -> None:
+    data = load_config()
+    current = data
+    parts = path.split(".")
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = value
+    save_config(data)
+
+
 def get_str(path: str, default: Optional[str] = None, env: Optional[str] = None) -> Optional[str]:
     if env and os.getenv(env) is not None:
         return os.getenv(env)

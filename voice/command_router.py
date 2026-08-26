@@ -1,8 +1,14 @@
-import re
-from dataclasses import dataclass
-from typing import Any, Dict
+from __future__ import annotations
 
-from .normalize import normalize_text
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+from .interpretation import (
+    ConversationContext,
+    InterpretedCommand,
+    InterpretationPipeline,
+    InputNormalizer,
+)
 
 
 @dataclass
@@ -10,120 +16,183 @@ class RouteResult:
     kind: str
     command: str
     tool: str = ""
-    args: Dict[str, Any] = None
+    args: Optional[Dict[str, Any]] = None
     reason: str = ""
+    interpretation: Optional[InterpretedCommand] = None
 
     def as_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "kind": self.kind,
             "command": self.command,
             "tool": self.tool,
             "args": self.args or {},
             "reason": self.reason,
         }
+        if self.interpretation:
+            data["interpretation"] = self.interpretation.as_dict()
+        return data
 
 
-def route_command(command: str) -> RouteResult:
-    normalized = normalize_text(command)
+def route_command(command: str, state: Optional[Any] = None) -> RouteResult:
+    context = ConversationContext(state).get()
+    interpreted = InterpretationPipeline().interpret(command, context)
+    route = _route_interpreted(interpreted)
+    if route.kind == "mcp":
+        ConversationContext(state).update_from_interpretation(interpreted)
+    return route
+
+
+def normalize_command(command: str) -> str:
+    return InputNormalizer().normalize(command)
+
+
+def _route_interpreted(interpreted: InterpretedCommand) -> RouteResult:
+    normalized = interpreted.normalized_text
+    intent = interpreted.intent
+
     if not normalized:
-        return RouteResult(kind="ignore", command=command, reason="empty command")
+        return _route("ignore", interpreted, reason="empty command")
 
-    incomplete_music_verbs = {
-        "pon",
-        "ponme",
-        "reproduce",
-        "reproducir",
-        "toca",
-        "busca",
-        "buscar",
-        "quiero escuchar",
-    }
-    if normalized in incomplete_music_verbs:
-        return RouteResult(kind="session", command=normalized, reason="missing command target")
+    if interpreted.reason == "missing command target":
+        return _route("session", interpreted, reason="missing command target")
 
-    fast_path = {
-        "pausa": ("youtube_music.pause", {}),
-        "pausar": ("youtube_music.pause", {}),
-        "pause": ("youtube_music.pause", {}),
-        "reanuda": ("youtube_music.resume", {}),
-        "continua": ("youtube_music.resume", {}),
-        "continuar": ("youtube_music.resume", {}),
-        "resume": ("youtube_music.resume", {}),
-        "siguiente": ("youtube_music.next", {}),
-        "next": ("youtube_music.next", {}),
-        "anterior": ("youtube_music.previous", {}),
-        "previous": ("youtube_music.previous", {}),
-        "esa no": ("youtube_music.esa_no", {}),
-        "otra": ("youtube_music.esa_no", {}),
-        "que suena": ("youtube_music.get_current_track", {}),
-        "que esta sonando": ("youtube_music.get_current_track", {}),
-        "baja": ("browser.scroll", {"direction": "down"}),
-        "sube": ("browser.scroll", {"direction": "up"}),
-        "vuelve": ("browser.back", {}),
-    }
-    if normalized in fast_path:
-        tool, args = fast_path[normalized]
-        return RouteResult(kind="mcp", command=normalized, tool=tool, args=args)
+    if intent == "pause_music":
+        return _route("mcp", interpreted, tool="youtube_music.pause")
+    if intent == "resume_music":
+        return _route("mcp", interpreted, tool="youtube_music.resume")
+    if intent == "next_track":
+        variant = interpreted.entities.get("variant")
+        tool = "youtube_music.esa_no" if variant in {"esa no", "otra"} else "youtube_music.next"
+        return _route("mcp", interpreted, tool=tool)
+    if intent == "previous_track":
+        return _route("mcp", interpreted, tool="youtube_music.previous")
+    if intent == "current_track":
+        return _route("mcp", interpreted, tool="youtube_music.get_current_track")
+    if intent == "browser_scroll":
+        return _route("mcp", interpreted, tool="browser.scroll", args=interpreted.entities)
+    if intent == "browser_back":
+        return _route("mcp", interpreted, tool="browser.back")
+    if intent == "browser_click":
+        return _route("mcp", interpreted, tool="browser.smart_click", args=interpreted.entities)
 
-    if normalized in {"sube volumen", "baja volumen", "mute"}:
-        return RouteResult(kind="codex", command=normalized, reason="system volume tool not implemented")
+    if intent == "set_volume":
+        return _route("mcp", interpreted, tool="system.set_volume", args=interpreted.entities)
 
-    if re.match(r"^(?:busca|buscar)\s+(?:que|qué|como|cómo|cuanto|cuánto|por que|por qué)\b", normalized):
-        return RouteResult(kind="codex", command=command, reason="open-ended search")
+    if intent == "codex_status":
+        return _route("status", interpreted, command="codex", reason="codex status")
 
-    if re.match(r"^(?:abre|abrir|entra|entrar)\b", normalized):
-        return RouteResult(kind="codex", command=command, reason="browser navigation requires reasoning")
-
-    ordinal_music = {
-        "la primera": 0,
-        "el primero": 0,
-        "primera": 0,
-        "primero": 0,
-        "la segunda": 1,
-        "el segundo": 1,
-        "segunda": 1,
-        "segundo": 1,
-        "la tercera": 2,
-        "el tercero": 2,
-        "tercera": 2,
-        "tercero": 2,
-    }
-    if normalized in ordinal_music:
-        return RouteResult(
-            kind="mcp",
-            command=normalized,
-            tool="youtube_music.play_last_search_index",
-            args={"index": ordinal_music[normalized]},
+    if intent == "remember_information":
+        return _route(
+            "memory",
+            interpreted,
+            command="remember",
+            args={"text": interpreted.entities.get("text", "")},
+            reason="memory note",
         )
 
-    play_match = re.match(
-        r"^(?:pon|ponme|reproduce|reproducir|toca|busca|buscar|quiero escuchar)\s+(.+)$",
-        normalized,
+    if intent in {"rest", "shutdown"}:
+        return _route("local", interpreted, command=intent, reason="local fast intent")
+    if intent == "get_time":
+        return _route("local", interpreted, command="time", reason="local fast intent")
+    if intent == "get_date":
+        return _route("local", interpreted, command="date", reason="local fast intent")
+    if intent == "assistant_status":
+        return _route("local", interpreted, command="assistant_status", reason="local fast intent")
+    if intent in {"time", "date"}:
+        return _route("local", interpreted, command=intent, reason="local fast intent")
+
+    if intent == "open_application":
+        return _route(
+            "mcp",
+            interpreted,
+            tool="system.open_app",
+            args={"name": interpreted.entities.get("name", "")},
+            reason="system app launch",
+        )
+    if intent == "close_application":
+        return _route(
+            "mcp",
+            interpreted,
+            tool="system.close_app",
+            args={"name": interpreted.entities.get("name", "")},
+            reason="system app close",
+        )
+    if intent == "web_search":
+        return _route(
+            "mcp",
+            interpreted,
+            tool="web.search_google",
+            args={"query": interpreted.entities.get("query", "")},
+            reason="web search",
+        )
+    if intent == "web_open":
+        return _route(
+            "mcp",
+            interpreted,
+            tool="web.open",
+            args={"target": interpreted.entities.get("target", "")},
+            reason="web open",
+        )
+    if intent == "play_music_index":
+        return _route(
+            "mcp",
+            interpreted,
+            tool="youtube_music.play_last_search_index",
+            args={"index": interpreted.entities.get("index", 0)},
+        )
+    if intent == "play_music" and not interpreted.needs_reasoning:
+        return _route(
+            "mcp",
+            interpreted,
+            tool="youtube_music.play",
+            args=_music_tool_args(interpreted.entities),
+        )
+
+    if interpreted.needs_reasoning:
+        reason = interpreted.reason or "local parser did not understand command"
+        command = interpreted.entities.get("text") or _codex_command(interpreted) or interpreted.raw_text
+        return _route("codex", interpreted, command=command, reason=reason)
+
+    return _route("ignore", interpreted, reason=interpreted.reason or "not a command")
+
+
+def _route(
+    kind: str,
+    interpreted: InterpretedCommand,
+    command: Optional[str] = None,
+    tool: str = "",
+    args: Optional[Dict[str, Any]] = None,
+    reason: str = "",
+) -> RouteResult:
+    return RouteResult(
+        kind=kind,
+        command=command if command is not None else interpreted.normalized_text,
+        tool=tool,
+        args=args or {},
+        reason=reason or interpreted.reason,
+        interpretation=interpreted,
     )
-    if play_match:
-        query = _clean_music_query(play_match.group(1))
-        return RouteResult(kind="mcp", command=normalized, tool="youtube_music.play", args={"query": query})
-
-    codex_prefixes = (
-        "busca ",
-        "buscar ",
-        "abre ",
-        "abrir ",
-        "entra ",
-        "entrar ",
-        "dale ",
-        "haz ",
-        "dime ",
-        "explica ",
-        "revisa ",
-        "consulta ",
-    )
-    if normalized.startswith(codex_prefixes):
-        return RouteResult(kind="codex", command=command, reason="open-ended command")
-
-    return RouteResult(kind="ignore", command=command, reason="not a command")
 
 
-def _clean_music_query(query: str) -> str:
-    query = re.sub(r"\bde\b", " ", query)
-    return " ".join(query.split())
+def _music_tool_args(entities: Dict[str, Any]) -> Dict[str, Any]:
+    args = {"query": str(entities.get("query") or "").strip()}
+    for key in ("artist", "album"):
+        value = str(entities.get(key) or "").strip()
+        if value:
+            args[key] = value
+    platform = str(entities.get("platform") or "").strip()
+    if platform:
+        args["platform"] = platform
+    return args
+
+
+def _codex_command(interpreted: InterpretedCommand) -> str:
+    if interpreted.reason == "browser navigation requires reasoning":
+        return interpreted.raw_text
+    if interpreted.reason == "open-ended search":
+        return interpreted.normalized_text
+    if interpreted.reason == "open-ended question":
+        if interpreted.normalized_text.startswith("que suena protocolo "):
+            return interpreted.normalized_text.replace("que suena ", "", 1)
+        return interpreted.normalized_text
+    return interpreted.normalized_text
