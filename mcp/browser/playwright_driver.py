@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 import os
 import re
 import time
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.config import get_bool, get_int, get_str
+from core.logging import write_log
 from .executable_resolver import resolve_browser_executable
 from .selector_utils import find_by_accessibility, simple_text_locator_candidates
 from core.recovery import retry_action, classify_exception, ErrorCategory
@@ -71,6 +73,8 @@ class PlaywrightBrowser:
         self._browser = None
         self._context = None
         self._page = None
+        self._suspend_focus_sync = 0
+        self._controlled_pages: Dict[str, Any] = {}
         self.state: Dict[str, Any] = {
             "url": None,
             "title": None,
@@ -78,10 +82,12 @@ class PlaywrightBrowser:
             "visibleElements": [],
             "recentActions": [],
             "lastSelectedElement": None,
+            "controlledTabs": {},
         }
 
     def _ensure_started(self):
         if self._started:
+            self._sync_to_focused_page()
             return
         try:
             from playwright.sync_api import sync_playwright
@@ -146,6 +152,13 @@ class PlaywrightBrowser:
         self._context.set_default_timeout(self.default_timeout_ms)
         self._context.set_default_navigation_timeout(self.navigation_timeout_ms)
         self._started = True
+
+    def _sync_to_focused_page(self):
+        if self._suspend_focus_sync or not self._context:
+            return
+        focused = self._focused_page()
+        if focused is not None:
+            self._page = focused
 
     @staticmethod
     def _clear_running_loop_for_sync_playwright():
@@ -481,6 +494,125 @@ class PlaywrightBrowser:
             tabs.append({"index": i, "url": p.url, "title": p.title()})
         return tabs
 
+    def find_tab(self, url_contains: str = "", title_contains: str = "") -> Optional[int]:
+        self._ensure_started()
+        url_query = (url_contains or "").lower()
+        title_query = (title_contains or "").lower()
+        for index, page in enumerate(self._context.pages):
+            try:
+                url = (page.url or "").lower()
+                title = (page.title() or "").lower()
+            except Exception:
+                continue
+            if url_query and url_query not in url:
+                continue
+            if title_query and title_query not in title:
+                continue
+            return index
+        return None
+
+    def _focused_page(self):
+        for page in self._context.pages:
+            try:
+                if page.evaluate("document.hasFocus()"):
+                    return page
+            except Exception:
+                continue
+        return None
+
+    def _remember_controlled_page(self, key: str, page) -> None:
+        if not key or page is None:
+            return
+        self._controlled_pages[key] = page
+        self.state["controlledTabs"][key] = self._page_snapshot(page)
+
+    def _controlled_page(self, key: str):
+        page = self._controlled_pages.get(key)
+        if page is None:
+            return None
+        try:
+            if page.is_closed():
+                self._controlled_pages.pop(key, None)
+                self.state["controlledTabs"].pop(key, None)
+                return None
+        except Exception:
+            return None
+        return page
+
+    def _page_snapshot(self, page=None) -> Dict[str, Any]:
+        page = page or self._page
+        if page is None:
+            return {"index": None, "url": None, "title": None}
+        try:
+            index = self._context.pages.index(page) if self._context else None
+        except Exception:
+            index = None
+        try:
+            url = page.url
+        except Exception:
+            url = None
+        try:
+            title = page.title()
+        except Exception:
+            title = None
+        return {"index": index, "url": url, "title": title}
+
+    @contextmanager
+    def using_tab(
+        self,
+        url_contains: str = "",
+        title_contains: str = "",
+        create_url: Optional[str] = None,
+        restore: bool = True,
+        remember_key: str = "",
+    ):
+        self._ensure_started()
+        previous = self._focused_page() or self._page
+        before = self._page_snapshot(previous)
+        self._suspend_focus_sync += 1
+        try:
+            page = self._controlled_page(remember_key)
+            if page is None:
+                index = self.find_tab(url_contains=url_contains, title_contains=title_contains)
+                page = None if index is None else self._context.pages[index]
+            if page is None:
+                if not create_url:
+                    yield None
+                    return
+                page = self._context.new_page()
+                page.goto(create_url, timeout=self.navigation_timeout_ms, wait_until="domcontentloaded")
+            self._remember_controlled_page(remember_key, page)
+            self._page = page
+            target = self._page_snapshot(page)
+            write_log(
+                "BROWSER",
+                "tab_context_enter",
+                before=before,
+                target=target,
+                remember_key=remember_key,
+                url_contains=url_contains,
+                title_contains=title_contains,
+            )
+            yield page
+        finally:
+            if "page" in locals():
+                target = self._page_snapshot(page)
+                self._remember_controlled_page(remember_key, page)
+            self._suspend_focus_sync = max(0, self._suspend_focus_sync - 1)
+            if restore and previous is not None:
+                try:
+                    if not previous.is_closed():
+                        self._page = previous
+                        previous.bring_to_front()
+                        write_log(
+                            "BROWSER",
+                            "tab_context_restore",
+                            restored=self._page_snapshot(previous),
+                            target=target if "target" in locals() else None,
+                        )
+                except Exception:
+                    pass
+
     def switch_tab(self, index: int = 0):
         self._ensure_started()
         pages = self._context.pages
@@ -517,9 +649,12 @@ class PlaywrightBrowser:
         try:
             self.state["url"] = self._page.url
             self.state["title"] = self._page.title()
+            self.state["tab"] = self._context.pages.index(self._page) if self._context else 0
         except Exception:
             pass
-        self.state["recentActions"].append({"action": action, "ts": time.time()})
+        current = self._page_snapshot()
+        self.state["recentActions"].append({"action": action, "ts": time.time(), "page": current})
+        write_log("BROWSER", "action", action=action, page=current)
 
 
 def _element_is_clickable(element: Dict[str, Any]) -> bool:

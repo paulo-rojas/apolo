@@ -4,13 +4,15 @@ apolov2 es un agente personal local, open source y orientado al uso diario. Este
 
 ## Instalación
 
-Requiere Python 3.11+.
+Requiere Python 3.12. Python 3.14 todavia tiene incompatibilidades practicas
+con paquetes de audio en Windows, especialmente `PyAudio` y `webrtcvad`.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 python -m pip install fastapi uvicorn playwright pytest PySide6 kokoro-onnx soundfile sounddevice numpy faster-whisper keyboard
+python -m pip install "RealtimeSTT[faster-whisper]"
 python -m playwright install chromium
 ```
 
@@ -41,6 +43,9 @@ Copy-Item config\apolo.example.json config\apolo.json
 ```
 
 Edita ahí rutas de navegador, `whisper.cpp`, modelo, timeouts, VAD y sesión de voz.
+Por seguridad, Apolo usa un perfil de navegador aislado y solo inicia o conecta
+Playwright cuando va a ejecutar una herramienta. No controla tu navegador personal
+en segundo plano.
 También puedes habilitar Codex CLI como cerebro bajo demanda:
 
 ```json
@@ -101,7 +106,8 @@ También puedes crear `config/browser_executables.json`:
 
 Para nuevos cambios, prefiere `config/apolo.json`; `browser_executables.json` queda soportado por compatibilidad.
 
-Para usar tu perfil real de Brave, usa el directorio raíz `User Data` y separa el perfil:
+Para usar tu perfil real de Brave, usa el directorio raíz `User Data` y separa el perfil.
+Esto es opcional y permite que Apolo comparta tus cookies y pestañas:
 
 ```json
 {
@@ -210,10 +216,10 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/call -ContentType "app
 
 ## Probar Voz
 
-La arquitectura local de voz es:
+La arquitectura local de voz recomendada es:
 
 ```text
-microfono -> VAD/PTT -> faster-whisper -> transcripcion -> Voice Gateway -> MCP/Codex
+microfono -> RealtimeSTT/WebRTC+Silero VAD -> faster-whisper -> Voice Gateway -> MCP/Codex
 ```
 
 apolov2 usa una union perezosa con el navegador: no abre ni inspecciona Brave solo para
@@ -221,16 +227,24 @@ entender una frase. Primero traduce la instruccion. Solo ejecuta acciones cuando
 router devuelve una herramienta MCP concreta, por ejemplo `youtube_music.play` o
 `browser.open`.
 
-Configura `faster-whisper` en `config/apolo.json`:
+Configura `RealtimeSTT` en `config/apolo.json`. El listener lo ejecuta en un proceso
+trabajador con timeout y vuelve a `faster-whisper` si falla, para evitar que Apolo se
+quede bloqueado esperando audio o modelos:
 
 ```json
 {
   "whisper": {
-    "backend": "faster-whisper",
-    "model": "medium",
+    "backend": "realtime-stt",
+    "model": "small",
     "device": "cuda",
     "compute_type": "float16",
     "language": "es"
+  },
+  "realtime_stt": {
+    "fallback_backend": "faster-whisper",
+    "timeout_seconds": 25,
+    "webrtc_sensitivity": 2,
+    "silero_sensitivity": 0.45
   }
 }
 ```

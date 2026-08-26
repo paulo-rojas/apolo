@@ -33,6 +33,9 @@
     "verify_retries": 5,
     "verify_delay_seconds": 0.7
   },
+  "actions": {
+    "timeout_seconds": 5
+  },
   "voice": {
     "mode": "open",
     "hotkey": "ctrl+space",
@@ -40,6 +43,13 @@
     "computer_audio_guard_seconds": 3600,
     "min_confidence": 0.45,
     "min_duration_ms": 250,
+    "training": {
+      "enabled": true,
+      "save_audio": true,
+      "save_wake_commands": true,
+      "save_all": false,
+      "dir": "voice_samples"
+    },
     "vad": {
       "sample_rate": 16000,
       "threshold": 0.015,
@@ -60,9 +70,9 @@
     "context_ttl_seconds": 180
   },
   "whisper": {
-    "backend": "faster-whisper",
+    "backend": "realtime-stt",
     "executable": "C:\\ruta\\a\\whisper-cli.exe",
-    "model": "base",
+    "model": "small",
     "model_path": "C:\\ruta\\a\\models\\ggml-medium.bin",
     "preload": true,
     "threads": 8,
@@ -70,14 +80,31 @@
     "timeout_seconds": 120,
     "device": "cuda",
     "compute_type": "float16",
-    "fallback_model": "base",
+    "fallback_model": "small",
     "fallback_device": "cpu",
     "fallback_compute_type": "int8",
-    "beam_size": 1,
-    "transcribe_timeout_seconds": 7,
-    "max_new_tokens": 32,
-    "hotwords": "apolov2, Apolo v2, Apolo, Apollo, hola apolov2, hola Apolo, pon, reproduce, pausa, continúa, siguiente, anterior, esa no, qué suena, Codex",
-    "prompt": "Frases cortas en español para un asistente llamado apolov2. El usuario suele empezar con apolov2, Apolo v2, Apolo u hola Apolo. Comandos: pon, reproduce, pausa, continua, siguiente, anterior, esa no, que suena, me escuchas, conexion con Codex."
+    "beam_size": 3,
+    "patience": 1.0,
+    "transcribe_timeout_seconds": 10,
+    "max_new_tokens": 48,
+    "hotwords": "Apolo, Apollo, hola Apolo, abre el navegador, abre Brave, inicia navegador, pon, reproduce, pausa, continúa, siguiente canción, anterior canción, esa no, qué suena, sube volumen, baja volumen, YouTube Music, The Strokes, Linkin Park, Numb, Someday, Codex",
+    "prompt": "Frases cortas en español para un asistente llamado Apolo. El usuario suele empezar con Apolo u hola Apolo. Comandos frecuentes: abre el navegador, inicia Brave, pon una cancion, reproduce musica, pausa, continua, siguiente cancion, anterior cancion, esa no, que suena, sube volumen, baja volumen, me escuchas, conexion con Codex. Puede dictar nombres de canciones y artistas en ingles."
+  },
+  "realtime_stt": {
+    "fallback_backend": "faster-whisper",
+    "timeout_seconds": 25,
+    "engine": "faster_whisper",
+    "model": "small",
+    "device": "cuda",
+    "compute_type": "float16",
+    "beam_size": 3,
+    "webrtc_sensitivity": 2,
+    "silero_sensitivity": 0.45,
+    "silero_use_onnx": true,
+    "post_speech_silence_duration": 0.7,
+    "pre_recording_buffer_duration": 0.5,
+    "min_length_of_recording": 0.35,
+    "faster_whisper_vad_filter": false
   },
   "kokoro": {
     "model_path": "C:\\apolo\\models\\kokoro\\kokoro-v1.0.onnx",

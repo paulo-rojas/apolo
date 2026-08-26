@@ -254,6 +254,16 @@ def test_short_garbled_wake_command_requests_repeat(tmp_path):
     assert result["reason"] == "command not understood"
 
 
+def test_garbled_de_artist_wake_command_does_not_open_music(tmp_path):
+    gateway = VoiceGateway(State(str(tmp_path / "state.db")))
+
+    result = gateway.handle_transcript("Apolo de meldía.")
+
+    assert result["kind"] == "repeat"
+    assert "tool" not in result
+    assert result["reason"] == "command not understood"
+
+
 def test_single_garbled_wake_command_requests_repeat(tmp_path):
     gateway = VoiceGateway(State(str(tmp_path / "state.db")))
 

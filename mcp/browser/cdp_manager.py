@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -36,7 +35,7 @@ def ensure_cdp(
     selected_browser: Optional[str] = None,
     timeout_seconds: Optional[int] = None,
     restore_last_session: Optional[bool] = None,
-    close_existing: bool = True,
+    close_existing: bool = False,
     runner: Callable[..., Any] = subprocess.run,
     popen: Callable[..., Any] = subprocess.Popen,
 ) -> Dict[str, Any]:
@@ -60,7 +59,7 @@ def ensure_cdp(
     if close_existing:
         close_browser_processes(selected_browser, runner=runner)
 
-    start_browser_with_cdp(
+    process_pid = start_browser_with_cdp(
         executable=executable,
         endpoint=endpoint,
         profile_directory=profile_directory,
@@ -71,7 +70,10 @@ def ensure_cdp(
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if is_cdp_available(endpoint, timeout=1.0):
-            return {"ok": True, "status": "started", "endpoint": endpoint}
+            result = {"ok": True, "status": "started", "endpoint": endpoint}
+            if process_pid is not None:
+                result["pid"] = process_pid
+            return result
         time.sleep(0.4)
 
     raise BrowserCdpEnsureError(f"CDP did not become available at {endpoint}")
@@ -115,14 +117,15 @@ def start_browser_with_cdp(
     profile_directory: Optional[str],
     restore_last_session: bool,
     popen: Callable[..., Any] = subprocess.Popen,
-) -> None:
+) -> Optional[int]:
     port = cdp_port(endpoint)
     args = [executable, f"--remote-debugging-port={port}"]
     if profile_directory:
         args.append(f"--profile-directory={profile_directory}")
     if restore_last_session:
         args.append("--restore-last-session")
-    _popen_hidden(popen, args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process = _popen_hidden(popen, args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return getattr(process, "pid", None)
 
 
 def _run_hidden(runner: Callable[..., Any], args: list[str], **kwargs) -> Any:
@@ -158,9 +161,9 @@ def browser_process_name(selected_browser: Optional[str]) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ensure a browser CDP endpoint is available.")
     parser.add_argument("--endpoint", default=get_str("browser.cdp_endpoint") or DEFAULT_CDP_ENDPOINT)
-    parser.add_argument("--no-close", action="store_true")
+    parser.add_argument("--close-existing", action="store_true")
     args = parser.parse_args()
-    result = ensure_cdp(endpoint=args.endpoint, close_existing=not args.no_close)
+    result = ensure_cdp(endpoint=args.endpoint, close_existing=args.close_existing)
     print(json.dumps(result, ensure_ascii=False))
 
 

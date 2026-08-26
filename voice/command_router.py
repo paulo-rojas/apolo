@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from .interpretation import (
     ConversationContext,
     InterpretedCommand,
+    IntentRegistry,
     InterpretationPipeline,
     InputNormalizer,
 )
@@ -31,6 +32,30 @@ class RouteResult:
         if self.interpretation:
             data["interpretation"] = self.interpretation.as_dict()
         return data
+
+
+@dataclass(frozen=True)
+class ActionPlan:
+    intent: str
+    tool: str
+    args: Dict[str, Any]
+    reason: str = "registered intent"
+
+
+class ActionPlanner:
+    def __init__(self, registry: Optional[IntentRegistry] = None):
+        self.registry = registry or IntentRegistry()
+
+    def plan(self, interpreted: InterpretedCommand) -> Optional[ActionPlan]:
+        if interpreted.needs_reasoning or interpreted.intent == "unknown":
+            return None
+        tool = self.registry.tool_for(interpreted.intent)
+        if not tool:
+            return None
+        return ActionPlan(interpreted.intent, tool, dict(interpreted.entities), "registered intent")
+
+
+_ACTION_PLANNER = ActionPlanner()
 
 
 def route_command(command: str, state: Optional[Any] = None) -> RouteResult:
@@ -66,6 +91,8 @@ def _route_interpreted(interpreted: InterpretedCommand) -> RouteResult:
         return _route("mcp", interpreted, tool=tool)
     if intent == "previous_track":
         return _route("mcp", interpreted, tool="youtube_music.previous")
+    if intent == "restart_track":
+        return _route("mcp", interpreted, tool="youtube_music.restart")
     if intent == "current_track":
         return _route("mcp", interpreted, tool="youtube_music.get_current_track")
     if intent == "browser_scroll":
@@ -102,6 +129,15 @@ def _route_interpreted(interpreted: InterpretedCommand) -> RouteResult:
         return _route("local", interpreted, command=intent, reason="local fast intent")
 
     if intent == "open_application":
+        app_name = str(interpreted.entities.get("name", "") or "").strip().lower()
+        if app_name in {"navegador", "browser", "brave"}:
+            return _route(
+                "mcp",
+                interpreted,
+                tool="browser.ensure_cdp",
+                args={},
+                reason="browser cdp launch",
+            )
         return _route(
             "mcp",
             interpreted,
@@ -147,6 +183,10 @@ def _route_interpreted(interpreted: InterpretedCommand) -> RouteResult:
             tool="youtube_music.play",
             args=_music_tool_args(interpreted.entities),
         )
+
+    action = _ACTION_PLANNER.plan(interpreted)
+    if action:
+        return _route("mcp", interpreted, tool=action.tool, args=action.args, reason=action.reason)
 
     if interpreted.needs_reasoning:
         reason = interpreted.reason or "local parser did not understand command"

@@ -136,6 +136,7 @@ def build_codex_prompt(command: str, context: Dict[str, Any], agent_prompt: str 
             "browser.smart_click",
             "browser.dom_type",
             "browser.dom_press",
+            "browser.ensure_cdp",
             "web.open",
             "web.search_google",
             "web.remember",

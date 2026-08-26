@@ -1,5 +1,6 @@
 from core.state import State
-from voice.command_router import normalize_command, route_command
+from voice.command_router import ActionPlanner, normalize_command, route_command
+from voice.interpretation import IntentRegistry, IntentSpec, InterpretedCommand
 
 
 def test_music_variants_converge_to_play_music():
@@ -68,6 +69,7 @@ def test_music_platform_is_extracted_from_en_youtube():
 
 def test_de_prefix_is_artist_for_music_intent():
     result = route_command("de Los Angeles Azules").as_dict()
+    single_word = route_command("de Queen").as_dict()
 
     assert result["kind"] == "mcp"
     assert result["tool"] == "youtube_music.play"
@@ -77,6 +79,8 @@ def test_de_prefix_is_artist_for_music_intent():
     assert result["interpretation"]["semantic_tree"]["children"][0]["children"] == [
         {"role": "artist", "text": "los angeles azules"}
     ]
+    assert single_word["tool"] == "youtube_music.play"
+    assert single_word["args"] == {"query": "", "artist": "queen"}
 
 
 def test_de_artist_with_platform_is_structured():
@@ -111,6 +115,44 @@ def test_web_search_variants_route_to_google():
     assert repeated["args"] == {"query": "hoteles en lima"}
 
 
+def test_non_music_intents_also_expose_a_semantic_tree():
+    result = route_command("busca hoteles en Lima").as_dict()
+
+    assert result["interpretation"]["semantic_tree"] == {
+        "role": "web_search",
+        "text": "busca hoteles en lima",
+        "children": [{"role": "query", "text": "hoteles en lima"}],
+    }
+
+
+def test_restart_song_routes_to_youtube_music():
+    result = route_command("reinicia la cancion").as_dict()
+
+    assert result["tool"] == "youtube_music.restart"
+    assert result["interpretation"]["intent"] == "restart_track"
+
+
+def test_registered_future_domain_becomes_a_structured_action():
+    planner = ActionPlanner(IntentRegistry([IntentSpec("send_email", ("to", "body"), tool_handler="mail.send")]))
+    interpreted = InterpretedCommand(
+        "manda un correo a ana",
+        "manda un correo a ana",
+        "send_email",
+        {"to": "ana", "body": "hola"},
+        0.95,
+    )
+
+    plan = planner.plan(interpreted)
+
+    assert plan is not None
+    assert plan.tool == "mail.send"
+    assert plan.args == {"to": "ana", "body": "hola"}
+    assert interpreted.semantic_tree.as_dict()["children"] == [
+        {"role": "to", "text": "ana"},
+        {"role": "body", "text": "hola"},
+    ]
+
+
 def test_application_open_and_correction():
     chrome = route_command("abre Chrome").as_dict()
     firefox = route_command("abre... no, abre Firefox").as_dict()
@@ -128,6 +170,16 @@ def test_close_discord_transcription_error_stays_local():
     assert result["tool"] == "system.close_app"
     assert result["args"] == {"name": "discord"}
     assert result["interpretation"]["needs_reasoning"] is False
+
+
+def test_start_browser_routes_to_cdp_ensure():
+    result = route_command("inicia navegador").as_dict()
+    open_result = route_command("abre el navegador").as_dict()
+
+    assert result["tool"] == "browser.ensure_cdp"
+    assert result["args"] == {}
+    assert open_result["tool"] == "browser.ensure_cdp"
+    assert open_result["args"] == {}
 
 
 def test_volume_intent_resolves_without_arbitrary_tool_execution():
@@ -153,6 +205,17 @@ def test_same_artist_uses_temporary_context(tmp_path):
     assert followup["tool"] == "youtube_music.play"
     assert followup["interpretation"]["source"] == "context"
     assert followup["interpretation"]["entities"]["artist"] == "linkin park"
+
+
+def test_context_keeps_the_last_structured_command_for_any_domain(tmp_path):
+    state = State(str(tmp_path / "state.db"))
+
+    route_command("busca hoteles en Lima", state=state)
+
+    context = state.get("conversationContext")
+    assert context["lastIntent"] == "web_search"
+    assert context["lastCommand"]["entities"] == {"query": "hoteles en lima"}
+    assert context["lastCommand"]["semanticTree"]["role"] == "web_search"
 
 
 def test_ambiguous_inputs_do_not_execute_arbitrary_tools():

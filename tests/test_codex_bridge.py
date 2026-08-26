@@ -20,6 +20,7 @@ def test_build_codex_prompt_contains_command_and_allowed_tools():
     assert "browser.open" in prompt
     assert "browser.dom_click" in prompt
     assert "browser.dom_type" in prompt
+    assert "browser.ensure_cdp" in prompt
     assert "web.open" in prompt
     assert "web.search_google" in prompt
     assert "system.open_app" in prompt

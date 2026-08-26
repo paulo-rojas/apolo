@@ -36,11 +36,17 @@ def _set_exact_volume(level: int) -> Dict[str, Any]:
 def _nudge_volume(direction: str, step: int = 2) -> Dict[str, Any]:
     if os.name != "nt":
         raise SystemVolumeUnavailable("volume hotkeys are only implemented on Windows")
-    command = "VolumeUp" if direction == "up" else "VolumeDown"
+    virtual_key = "0xAF" if direction == "up" else "0xAE"
     count = max(1, int(step))
     script = (
-        "$shell = New-Object -ComObject WScript.Shell; "
-        + " ".join(f"$shell.SendKeys('[{command}]'); Start-Sleep -Milliseconds 40;" for _ in range(count))
+        "Add-Type -Namespace Native -Name Keyboard -MemberDefinition "
+        "'[DllImport(\"user32.dll\")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);'; "
+        + " ".join(
+            f"[Native.Keyboard]::keybd_event({virtual_key},0,0,[UIntPtr]::Zero); "
+            f"[Native.Keyboard]::keybd_event({virtual_key},0,2,[UIntPtr]::Zero); "
+            "Start-Sleep -Milliseconds 40;"
+            for _ in range(count)
+        )
     )
     subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],

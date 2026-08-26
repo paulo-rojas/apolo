@@ -28,6 +28,7 @@ class FasterWhisperTranscriber:
         self.prompt = get_str("whisper.prompt", None)
         self.hotwords = get_str("whisper.hotwords", None)
         self.max_new_tokens = get_int("whisper.max_new_tokens", 32, minimum=4)
+        self.patience = get_float("whisper.patience", 1.0, minimum=0.0)
         self.cpu_threads = get_int("whisper.cpu_threads", get_int("whisper.threads", 4, minimum=1), minimum=1)
         self._model = None
         self._active_model_name = self.model_name
@@ -104,6 +105,7 @@ class FasterWhisperTranscriber:
             initial_prompt=self.prompt,
             hotwords=self.hotwords,
             max_new_tokens=self.max_new_tokens,
+            patience=self.patience,
             best_of=1,
             repetition_penalty=1.08,
             no_repeat_ngram_size=3,

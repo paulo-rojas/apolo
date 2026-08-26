@@ -29,7 +29,7 @@ class SearchResultYouTubeMusic(YouTubeMusic):
         self.candidates = candidates
         self.played = []
 
-    def search(self, query):
+    def search(self, query, deadline=None):
         return self.candidates
 
     def _play_candidate(self, cand):
@@ -211,6 +211,22 @@ def test_play_accepts_high_confidence_search_candidate(monkeypatch):
     assert result["ok"] is True
     assert result["candidate"]["title"] == "Numb"
     assert player.played == [{"title": "Numb", "artist": "Linkin Park", "score": 0.8}]
+
+
+def test_search_and_play_adults_are_talking_by_the_strokes(monkeypatch):
+    monkeypatch.setenv("APOLO_MUSIC_MIN_AUTO_SCORE", "0.35")
+    candidates = [
+        {"title": "The Adults Are Talking", "artist": "The Strokes", "kind": "song", "score": 0.9},
+        {"title": "The Adults Are Talking (Live)", "artist": "The Strokes", "kind": "video", "score": 0.4},
+    ]
+    player = SearchResultYouTubeMusic(candidates)
+
+    result = player.play("the adults are talking de the strokes")
+
+    assert result["ok"] is True
+    assert result["candidate"]["title"] == "The Adults Are Talking"
+    assert result["candidate"]["artist"] == "The Strokes"
+    assert player.played[0]["title"] == "The Adults Are Talking"
 
 
 def test_verify_playback_returns_bool_for_matching_track():

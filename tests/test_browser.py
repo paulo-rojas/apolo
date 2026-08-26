@@ -108,7 +108,7 @@ def test_smart_click_uses_accessible_button_name(monkeypatch, tmp_path):
     def run_browser_check():
         b = PlaywrightBrowser(headless=True)
         try:
-            b.open("data:text/html,<button aria-label='Reproducir canción' onclick=\"document.body.dataset.play='yes'\"></button>")
+            b.open("data:text/html,<button aria-label='Reproducir canci&oacute;n' onclick=\"document.body.dataset.play='yes'\"></button>")
             clicked = b.smart_click(target="reproducir")
             clicked_value = b._page.evaluate("document.body.dataset.play")
             return clicked, clicked_value

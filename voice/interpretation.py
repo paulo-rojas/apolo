@@ -40,6 +40,23 @@ class SemanticNode:
         return data
 
 
+def _semantic_tree_from_command(intent: str, normalized_text: str, entities: Dict[str, Any]) -> SemanticNode:
+    root = SemanticNode(intent, text=normalized_text)
+    for role, value in entities.items():
+        if value is None or value == "":
+            continue
+        if isinstance(value, dict):
+            children = [SemanticNode(str(child_role), text=str(child_value)) for child_role, child_value in value.items()]
+            root.children.append(SemanticNode(str(role), children=children))
+        elif isinstance(value, (list, tuple)):
+            root.children.append(
+                SemanticNode(str(role), children=[SemanticNode("value", text=str(item)) for item in value])
+            )
+        else:
+            root.children.append(SemanticNode(str(role), text=str(value)))
+    return root
+
+
 @dataclass
 class MemoryDecision:
     memory_action: str = "none"
@@ -66,6 +83,10 @@ class InterpretedCommand:
     memory: MemoryDecision = field(default_factory=MemoryDecision)
     semantic_tree: Optional[SemanticNode] = None
     reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.semantic_tree is None and self.intent != "unknown":
+            self.semantic_tree = _semantic_tree_from_command(self.intent, self.normalized_text, self.entities)
 
     def as_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -101,20 +122,26 @@ class ConversationContext:
         return {}
 
     def update_from_interpretation(self, interpreted: InterpretedCommand) -> Dict[str, Any]:
-        if not self.state or interpreted.intent != "play_music":
+        if not self.state or interpreted.intent == "unknown":
             return self.get()
         entities = interpreted.entities or {}
-        if not (entities.get("artist") or entities.get("query")):
+        if not entities and interpreted.intent not in {"pause_music", "resume_music", "next_track", "previous_track"}:
             return self.get()
         data = {
             "updatedAt": time.time(),
             "lastIntent": interpreted.intent,
-            "music": {
+            "lastCommand": {
+                "intent": interpreted.intent,
+                "entities": dict(entities),
+                "semanticTree": interpreted.semantic_tree.as_dict() if interpreted.semantic_tree else None,
+            },
+        }
+        if interpreted.intent == "play_music":
+            data["music"] = {
                 "query": entities.get("query"),
                 "artist": entities.get("artist"),
                 "album": entities.get("album"),
-            },
-        }
+            }
         self.state.set("conversationContext", data)
         return data
 
@@ -296,9 +323,18 @@ class DeterministicIntentResolver:
             "continuar": ("resume_music", 0.96),
             "resume": ("resume_music", 0.96),
             "siguiente": ("next_track", 0.98),
+            "siguiente cancion": ("next_track", 0.98),
+            "proxima": ("next_track", 0.96),
+            "proxima cancion": ("next_track", 0.97),
+            "cancion siguiente": ("next_track", 0.96),
             "next": ("next_track", 0.96),
             "anterior": ("previous_track", 0.98),
+            "anterior cancion": ("previous_track", 0.98),
+            "cancion anterior": ("previous_track", 0.96),
             "previous": ("previous_track", 0.96),
+            "reinicia": ("restart_track", 0.98),
+            "reiniciar": ("restart_track", 0.97),
+            "reinicia la cancion": ("restart_track", 0.96),
             "esa no": ("next_track", 0.94),
             "otra": ("next_track", 0.86),
             "que suena": ("current_track", 0.95),
@@ -389,6 +425,15 @@ class DeterministicIntentResolver:
                 normalized_text,
                 "open_application",
                 {"name": open_match.group(1).strip()},
+                0.91,
+            )
+        browser_match = re.match(r"^(?:abre|abra|abrir)\s+(?:el\s+|la\s+)?(?:navegador|browser|brave)$", normalized_text)
+        if browser_match:
+            return InterpretedCommand(
+                raw_text,
+                normalized_text,
+                "open_application",
+                {"name": "navegador"},
                 0.91,
             )
         open_simple = re.match(r"^(?:abre|abra|abrir)\s+(.+)$", normalized_text)
@@ -736,8 +781,26 @@ def _is_ambiguous_search(query: str) -> bool:
 
 
 def _looks_like_garbled_artist_reference(artist: str) -> bool:
-    tokens = set(str(artist or "").split())
-    return bool(tokens & {"alble", "ble", "pumbly"})
+    words = str(artist or "").split()
+    tokens = set(words)
+    if tokens & {"alble", "ble", "pumbly", "meldia"}:
+        return True
+    if len(words) == 1 and words[0] not in _KNOWN_SINGLE_WORD_ARTISTS:
+        return True
+    return False
+
+
+_KNOWN_SINGLE_WORD_ARTISTS = {
+    "adele",
+    "beatles",
+    "coldplay",
+    "metallica",
+    "nirvana",
+    "oasis",
+    "queen",
+    "radiohead",
+    "shakira",
+}
 
 
 def _open_question(normalized: str) -> str:
@@ -782,6 +845,7 @@ DEFAULT_INTENTS = (
     IntentSpec("resume_music", tool_handler="youtube_music.resume"),
     IntentSpec("next_track", tool_handler="youtube_music.next"),
     IntentSpec("previous_track", tool_handler="youtube_music.previous"),
+    IntentSpec("restart_track", tool_handler="youtube_music.restart"),
     IntentSpec("current_track", tool_handler="youtube_music.get_current_track"),
     IntentSpec("set_volume", optional_entities=("level", "direction")),
     IntentSpec("web_search", ("query",), tool_handler="web.search_google"),

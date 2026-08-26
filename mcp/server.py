@@ -6,7 +6,7 @@ import time
 import traceback
 from typing import Any, Dict
 
-from core.config import get_float
+from core.config import get_float, get_int
 from core.tool_contract import validate_structured_tool_args
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -31,9 +31,18 @@ class AgentWorker:
             try:
                 result = contextvars.Context().run(fn, *args, **kwargs)
             except Exception as e:
-                loop.call_soon_threadsafe(future.set_exception, e)
+                loop.call_soon_threadsafe(self._complete_future, future, None, e)
             else:
-                loop.call_soon_threadsafe(future.set_result, result)
+                loop.call_soon_threadsafe(self._complete_future, future, result, None)
+
+    @staticmethod
+    def _complete_future(future, result=None, exception=None):
+        if future.cancelled():
+            return
+        if exception is not None:
+            future.set_exception(exception)
+            return
+        future.set_result(result)
 
     async def call(self, fn, *args, **kwargs):
         loop = asyncio.get_running_loop()
@@ -67,6 +76,10 @@ class BrowserProxy:
                 from mcp.browser.playwright_driver import PlaywrightBrowser
 
                 self._impl = PlaywrightBrowser()
+                if getattr(self._impl, "cdp_endpoint", None):
+                    from mcp.browser.cdp_manager import ensure_cdp
+
+                    ensure_cdp(close_existing=False)
                 try:
                     self._impl._ensure_started()
                 except Exception as error:
@@ -87,6 +100,23 @@ class BrowserProxy:
         fn = getattr(self._impl, method, None)
         if fn is None:
             raise AttributeError(f"Browser has no method {method}")
+        tab_context = getattr(self._impl, "using_tab", None)
+        if tab_context and method in {
+            "open",
+            "find",
+            "click",
+            "type",
+            "dom_snapshot",
+            "dom_click",
+            "smart_click",
+            "dom_type",
+            "dom_press",
+            "scroll",
+            "back",
+            "screenshot",
+        }:
+            with tab_context(create_url="about:blank", restore=True, remember_key="browser"):
+                return fn(**args)
         return fn(**args)
 
     def snapshot_state(self):
@@ -128,7 +158,16 @@ class MusicProxy:
         fn = getattr(self._impl, method, None)
         if fn is None:
             raise AttributeError(f"YouTube Music has no method {method}")
-        return fn(**args)
+        tab_context = getattr(self._browser_proxy._impl, "using_tab", None)
+        if tab_context is None:
+            return fn(**args)
+        with tab_context(
+            url_contains="music.youtube.com",
+            create_url="https://music.youtube.com",
+            restore=True,
+            remember_key="youtube_music",
+        ):
+            return fn(**args)
 
 
 music = MusicProxy(browser)
@@ -223,11 +262,14 @@ async def execute_tool(tool: str, args: Dict[str, Any]):
     if tool == "system.set_volume":
         from core.system_volume import set_system_volume
 
-        return await run_agent_call(
-            set_system_volume,
-            args.get("level"),
-            args.get("direction"),
-            args.get("step", 2),
+        return await asyncio.wait_for(
+            run_agent_call(
+                set_system_volume,
+                args.get("level"),
+                args.get("direction"),
+                args.get("step", 2),
+            ),
+            timeout=get_int("actions.timeout_seconds", 5, minimum=1),
         )
 
     if tool == "system.remember_app":
@@ -256,11 +298,23 @@ async def execute_tool(tool: str, args: Dict[str, Any]):
 
     if tool.startswith("browser."):
         method = tool.split(".", 1)[1]
+        if method == "ensure_cdp":
+            from mcp.browser.cdp_manager import ensure_cdp
+
+            result = await run_agent_call(
+                ensure_cdp,
+                close_existing=bool(args.get("close_existing", False)),
+            )
+            await run_agent_call(browser._ensure)
+            return result
         return await run_agent_call(browser.call, method, args)
 
     if tool.startswith("youtube_music."):
         method = tool.split(".", 1)[1]
-        return await run_agent_call(music.call, method, args)
+        return await asyncio.wait_for(
+            run_agent_call(music.call, method, args),
+            timeout=get_int("actions.timeout_seconds", 5, minimum=1),
+        )
 
     raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
 
@@ -481,6 +535,8 @@ async def call(req: CallRequest):
 
 
 def error_response(e: Exception) -> Dict[str, Any]:
+    if isinstance(e, TimeoutError):
+        return {"ok": False, "error": "tool timed out"}
     if e.__class__.__name__ in {"BrowserProfileInUse", "BrowserCdpUnavailable"}:
         return {"ok": False, "error": str(e)}
     tb = traceback.format_exc()

@@ -35,4 +35,6 @@ def test_nudge_volume_uses_windows_media_keys(monkeypatch):
     result = volume.set_system_volume(direction="up", step=1)
 
     assert result == {"ok": True, "direction": "up", "step": 1, "method": "media_keys"}
-    assert "VolumeUp" in calls[0][-1]
+    assert "keybd_event(0xAF" in calls[0][-1]
+    assert "SendKeys" not in calls[0][-1]
+    assert "VolumeUp" not in calls[0][-1]

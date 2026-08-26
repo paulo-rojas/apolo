@@ -1,4 +1,6 @@
 import asyncio
+from contextlib import contextmanager
+import time
 
 import pytest
 
@@ -16,6 +18,44 @@ class FakeBrowserProxy:
 
     def _ensure(self):
         self.ensured = True
+
+
+class FakeTabbedBrowser:
+    def __init__(self):
+        self.used_tabs = []
+
+    @contextmanager
+    def using_tab(self, **kwargs):
+        self.used_tabs.append(kwargs)
+        yield object()
+
+    def smart_click(self, target):
+        return {"ok": True, "target": target}
+
+
+class FakeTabbedBrowserProxy(FakeBrowserProxy):
+    def __init__(self):
+        self._impl = FakeTabbedBrowser()
+        self.ensured = False
+
+
+def test_browser_proxy_does_not_connect_until_a_tool_is_called(monkeypatch):
+    import mcp.server as server
+
+    created = []
+
+    class FakeBrowser:
+        def __init__(self):
+            created.append(self)
+
+        def _ensure_started(self):
+            raise AssertionError("browser must not start during proxy construction")
+
+    monkeypatch.setattr("mcp.browser.playwright_driver.PlaywrightBrowser", FakeBrowser)
+    proxy = server.BrowserProxy()
+
+    assert proxy._impl is None
+    assert created == []
 
 
 def test_music_proxy_accepts_query_alias(monkeypatch):
@@ -65,6 +105,55 @@ def test_music_proxy_accepts_structured_music_entities(monkeypatch):
     )
 
     assert result == {"query_or_candidate": "Numb Linkin Park", "max_tries": 2}
+
+
+def test_music_proxy_runs_actions_in_youtube_music_tab(monkeypatch):
+    class FakeState:
+        pass
+
+    class FakeYouTubeMusic:
+        def __init__(self, browser, state=None):
+            self.browser = browser
+            self.state = state
+
+        def next(self):
+            return {"ok": True}
+
+    monkeypatch.setattr("core.state.State", FakeState)
+    monkeypatch.setattr("mcp.youtube_music.player.YouTubeMusic", FakeYouTubeMusic)
+
+    browser = FakeTabbedBrowserProxy()
+    proxy = MusicProxy(browser)
+
+    result = proxy.call("next", {})
+
+    assert result == {"ok": True}
+    assert browser._impl.used_tabs == [
+        {
+            "url_contains": "music.youtube.com",
+            "create_url": "https://music.youtube.com",
+            "restore": True,
+            "remember_key": "youtube_music",
+        }
+    ]
+
+
+def test_browser_proxy_runs_actions_in_remembered_browser_tab():
+    import mcp.server as server
+
+    proxy = server.BrowserProxy()
+    proxy._impl = FakeTabbedBrowser()
+
+    result = proxy.call("smart_click", {"target": "Enviar"})
+
+    assert result == {"ok": True, "target": "Enviar"}
+    assert proxy._impl.used_tabs == [
+        {
+            "create_url": "about:blank",
+            "restore": True,
+            "remember_key": "browser",
+        }
+    ]
 
 
 def test_browser_proxy_routes_dom_methods(monkeypatch):
@@ -119,6 +208,42 @@ def test_execute_tool_rejects_raw_voice_command_args():
 
     with pytest.raises(ToolContractError):
         asyncio.run(server.execute_tool("youtube_music.play", {"query": "Apolo pon Numb de Linkin Park"}))
+
+
+def test_music_tool_has_five_second_execution_timeout(monkeypatch, tmp_path):
+    import mcp.server as server
+
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(tmp_path / "missing-config.json"))
+
+    async def slow_call(*args, **kwargs):
+        await asyncio.sleep(6)
+
+    monkeypatch.setattr(server, "run_agent_call", slow_call)
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(server.execute_tool("youtube_music.pause", {}))
+
+
+def test_agent_worker_ignores_late_result_after_timeout():
+    import mcp.server as server
+
+    worker = server.AgentWorker()
+    loop_errors = []
+
+    def slow_call():
+        time.sleep(0.05)
+        return {"ok": True}
+
+    async def run_timeout():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(worker.call(slow_call), timeout=0.001)
+        await asyncio.sleep(0.1)
+
+    asyncio.run(run_timeout())
+
+    assert loop_errors == []
 
 
 def test_execute_tool_accepts_codex_app_arg_for_close_system_app(monkeypatch):
@@ -201,6 +326,30 @@ def test_execute_tool_can_search_google(monkeypatch):
     assert result == {"ok": True, "query": "clima lima"}
 
 
+def test_execute_tool_can_ensure_browser_cdp(monkeypatch):
+    import mcp.server as server
+
+    calls = []
+    ensured = []
+
+    def fake_ensure_cdp(close_existing=False):
+        calls.append(close_existing)
+        return {"ok": True, "status": "already_available"}
+
+    class FakeBrowser:
+        def _ensure(self):
+            ensured.append(True)
+
+    monkeypatch.setattr("mcp.browser.cdp_manager.ensure_cdp", fake_ensure_cdp)
+    monkeypatch.setattr(server, "browser", FakeBrowser())
+
+    result = asyncio.run(server.execute_tool("browser.ensure_cdp", {}))
+
+    assert result == {"ok": True, "status": "already_available"}
+    assert calls == [False]
+    assert ensured == [True]
+
+
 def test_browser_profile_in_use_error_omits_trace():
     result = error_response(BrowserProfileInUse("perfil ocupado"))
 
@@ -211,6 +360,12 @@ def test_browser_cdp_unavailable_error_omits_trace():
     result = error_response(BrowserCdpUnavailable("cdp apagado"))
 
     assert result == {"ok": False, "error": "cdp apagado"}
+
+
+def test_timeout_error_omits_trace():
+    result = error_response(TimeoutError())
+
+    assert result == {"ok": False, "error": "tool timed out"}
 
 
 def test_collect_codex_context_does_not_start_browser(monkeypatch):

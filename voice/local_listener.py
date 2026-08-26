@@ -1,6 +1,9 @@
 import argparse
+from datetime import datetime
 import json
 import os
+import shutil
+import subprocess
 import wave
 import sys
 import tempfile
@@ -11,8 +14,10 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 from core.audio_gate import listener_is_muted
-from core.config import get_float, get_int, get_str
+from core.config import PROJECT_ROOT, get_bool, get_float, get_int, get_str
 from core.listener_control import listener_is_resting, shutdown_requested
+from core.logging import write_log
+from core.memory_files import memory_dir
 from .microphone import MicrophoneNotAvailable, record_utterance_to_wav
 from .providers import create_speech_to_text_provider, wav_path_for_voice_command
 from .vad import VadConfig
@@ -36,7 +41,7 @@ def main():
     parser.add_argument("--block-ms", type=int, default=None)
     parser.add_argument("--mode", choices=("open", "push_to_talk"), default=None)
     parser.add_argument("--hotkey", default=None)
-    parser.add_argument("--transcriber", choices=("faster-whisper", "whisper-cpp"), default=None)
+    parser.add_argument("--transcriber", choices=("faster-whisper", "whisper-cpp", "realtime-stt", "realtimestt"), default=None)
     parser.add_argument("--diagnose", action="store_true")
     args = parser.parse_args()
 
@@ -52,7 +57,9 @@ def main():
     mode = args.mode or get_str("voice.mode", "open")
     transcriber_name = args.transcriber or get_str("whisper.backend", "faster-whisper")
     transcribe_timeout = get_int("whisper.transcribe_timeout_seconds", 12, env="APOLO_WHISPER_TRANSCRIBE_TIMEOUT_SECONDS", minimum=2)
-    transcriber = create_speech_to_text_provider(transcriber_name)
+    use_realtime_stt = _is_realtime_stt_backend(transcriber_name)
+    fallback_transcriber_name = get_str("realtime_stt.fallback_backend", "faster-whisper") or "faster-whisper"
+    transcriber = None if use_realtime_stt else create_speech_to_text_provider(transcriber_name)
     print(f"voice listener: starting mode={mode} transcriber={transcriber_name} block_ms={vad_config.block_ms} transcribe_timeout={transcribe_timeout}s", flush=True)
     if args.diagnose:
         _diagnose_audio(transcriber_name, transcriber)
@@ -96,22 +103,40 @@ def main():
                 start_immediately = True
             else:
                 print("voice listener: listening", flush=True)
-            record_utterance_to_wav(
-                str(wav_path),
-                sample_rate=vad_config.sample_rate,
-                vad_config=vad_config,
-                stop_when=stop_when,
-                start_immediately=start_immediately,
-            )
+            started_at = time.monotonic()
+            if use_realtime_stt:
+                try:
+                    result = _listen_with_realtime_stt(wav_path, args.language)
+                    transcript = result["text"]
+                    duration_ms = int(result.get("duration_ms", 0))
+                    elapsed_ms = int(result.get("elapsed_ms", int((time.monotonic() - started_at) * 1000)))
+                    backend_label = str(result.get("backend") or "realtime-stt")
+                except Exception as error:
+                    print(f"voice listener: realtime-stt failed; falling back to {fallback_transcriber_name}: {error}", flush=True)
+                    write_log("VOICE", f"realtime-stt failed; fallback={fallback_transcriber_name}: {error}")
+                    transcriber = create_speech_to_text_provider(fallback_transcriber_name)
+                    transcript, duration_ms, elapsed_ms, backend_label = _record_and_transcribe_legacy(
+                        transcriber,
+                        wav_path,
+                        language=args.language,
+                        timeout_seconds=transcribe_timeout,
+                        vad_config=vad_config,
+                        stop_when=stop_when,
+                        start_immediately=start_immediately,
+                    )
+            else:
+                transcript, duration_ms, elapsed_ms, backend_label = _record_and_transcribe_legacy(
+                    transcriber,
+                    wav_path,
+                    language=args.language,
+                    timeout_seconds=transcribe_timeout,
+                    vad_config=vad_config,
+                    stop_when=stop_when,
+                    start_immediately=start_immediately,
+                )
             if listener_is_muted():
                 print("voice listener: discarded self-audio", flush=True)
                 continue
-            duration_ms = _wav_duration_ms(wav_path)
-            print(f"voice listener: transcribing {duration_ms}ms", flush=True)
-            started_at = time.monotonic()
-            transcript = _transcribe_with_timeout(transcriber, wav_path, args.language, transcribe_timeout)
-            elapsed_ms = int((time.monotonic() - started_at) * 1000)
-            backend_label = getattr(transcriber, "backend_label", transcriber_name)
             print(f"voice listener: heard {transcript!r} in {elapsed_ms}ms using {backend_label}", flush=True)
             if _looks_like_prompt_echo(transcript):
                 print("voice listener: discarded prompt echo", flush=True)
@@ -126,7 +151,16 @@ def main():
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=60) as response:
-                print(response.read().decode("utf-8"))
+                response_text = response.read().decode("utf-8")
+                print(response_text)
+            _maybe_save_training_sample(
+                wav_path,
+                transcript=transcript,
+                response_text=response_text,
+                duration_ms=duration_ms,
+                elapsed_ms=elapsed_ms,
+                backend_label=backend_label,
+            )
         except MicrophoneNotAvailable as error:
             if not args.continuous:
                 raise
@@ -148,6 +182,88 @@ def _hotkey_is_pressed(keyboard, hotkey: str) -> bool:
     return all(keyboard.is_pressed(key) for key in keys)
 
 
+def _is_realtime_stt_backend(name: str) -> bool:
+    return str(name or "").strip().lower() in {"realtime-stt", "realtimestt", "realtime_stt"}
+
+
+def _record_and_transcribe_legacy(
+    transcriber,
+    wav_path: Path,
+    *,
+    language: str,
+    timeout_seconds: int,
+    vad_config: VadConfig,
+    stop_when=None,
+    start_immediately: bool = False,
+) -> tuple[str, int, int, str]:
+    record_utterance_to_wav(
+        str(wav_path),
+        sample_rate=vad_config.sample_rate,
+        vad_config=vad_config,
+        stop_when=stop_when,
+        start_immediately=start_immediately,
+    )
+    duration_ms = _wav_duration_ms(wav_path)
+    print(f"voice listener: transcribing {duration_ms}ms", flush=True)
+    started_at = time.monotonic()
+    transcript = _transcribe_with_timeout(transcriber, wav_path, language, timeout_seconds)
+    elapsed_ms = int((time.monotonic() - started_at) * 1000)
+    backend_label = getattr(transcriber, "backend_label", "unknown")
+    return transcript, duration_ms, elapsed_ms, backend_label
+
+
+def _listen_with_realtime_stt(wav_path: Path, language: str) -> dict:
+    timeout_seconds = get_int(
+        "realtime_stt.timeout_seconds",
+        get_int("voice.vad.max_utterance_ms", 8000, minimum=500) // 1000
+        + get_int("whisper.transcribe_timeout_seconds", 12, minimum=2)
+        + 5,
+        env="APOLO_REALTIMESTT_TIMEOUT_SECONDS",
+        minimum=3,
+    )
+    command = _realtime_stt_command(wav_path, language)
+    completed = subprocess.run(
+        command,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_seconds,
+    )
+    result = _parse_realtime_stt_result(completed.stdout)
+    if completed.returncode != 0 or not result.get("ok"):
+        detail = result.get("error") or completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+        raise RuntimeError(detail)
+    return result
+
+
+def _realtime_stt_command(wav_path: Path, language: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "voice.realtime_stt_worker",
+        "--output",
+        str(wav_path),
+        "--language",
+        language or "es",
+    ]
+
+
+def _parse_realtime_stt_result(stdout: str) -> dict:
+    for line in reversed(str(stdout or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    raise RuntimeError("realtime-stt produced no JSON result")
+
+
 def _wake_detected(transcript: str) -> bool:
     try:
         return strip_wake_word(transcript).detected
@@ -166,6 +282,75 @@ def _looks_like_prompt_echo(transcript: str) -> bool:
         "conexion con codex",
     )
     return any(fragment in normalized for fragment in prompt_fragments)
+
+
+def _maybe_save_training_sample(
+    wav_path: Path,
+    *,
+    transcript: str,
+    response_text: str,
+    duration_ms: int,
+    elapsed_ms: int,
+    backend_label: str,
+) -> None:
+    try:
+        response = json.loads(response_text or "{}")
+    except json.JSONDecodeError:
+        response = {"raw": response_text}
+    if not _should_save_training_sample(transcript, response):
+        return
+
+    try:
+        target_dir = _training_samples_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S-%f")
+        base_name = f"{timestamp}-{_training_kind(response)}"
+        audio_path = target_dir / f"{base_name}.wav"
+        meta_path = target_dir / f"{base_name}.json"
+        if get_bool("voice.training.save_audio", True):
+            shutil.copy2(wav_path, audio_path)
+        metadata = {
+            "createdAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "transcript": transcript,
+            "durationMs": duration_ms,
+            "transcribeMs": elapsed_ms,
+            "backend": backend_label,
+            "response": response,
+            "audio": str(audio_path) if audio_path.exists() else None,
+        }
+        meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_log("VOICE_TRAIN", f"saved sample {meta_path.name} transcript={transcript!r}")
+    except Exception as error:
+        write_log("VOICE_TRAIN", f"could not save sample: {error}")
+
+
+def _should_save_training_sample(transcript: str, response: dict) -> bool:
+    if not get_bool("voice.training.enabled", True):
+        return False
+    if not str(transcript or "").strip():
+        return False
+    if get_bool("voice.training.save_all", False):
+        return True
+    kind = str(response.get("kind") or response.get("parsed", {}).get("kind") or "")
+    if kind in {"repeat", "error"}:
+        return True
+    if response.get("ok") is False:
+        return True
+    return bool(get_bool("voice.training.save_wake_commands", True) and _wake_detected(transcript))
+
+
+def _training_kind(response: dict) -> str:
+    kind = str(response.get("kind") or response.get("parsed", {}).get("kind") or "sample").lower()
+    cleaned = "".join(ch if ch.isalnum() else "-" for ch in kind).strip("-")
+    return cleaned or "sample"
+
+
+def _training_samples_dir() -> Path:
+    configured = get_str("voice.training.dir", None)
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else memory_dir() / path
+    return memory_dir() / "voice_samples"
 
 
 def _wav_duration_ms(wav_path: Path) -> int:

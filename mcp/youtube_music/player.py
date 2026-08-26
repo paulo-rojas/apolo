@@ -69,6 +69,7 @@ def wants_original(query: str) -> bool:
 
 def clean_music_query(query: str) -> str:
     cleaned = query.strip()
+    cleaned = re.sub(r"\s+de\s+", " ", cleaned, flags=re.IGNORECASE)
     for modifier in ORIGINAL_MODIFIERS:
         cleaned = re.sub(rf"\b{re.escape(modifier)}\b", "", cleaned, flags=re.IGNORECASE)
     return " ".join(cleaned.split())
@@ -99,6 +100,20 @@ def is_variant_candidate(candidate: Dict[str, Any]) -> bool:
     )
 
 
+def track_matches_candidate(candidate: Dict[str, Any], track: Dict[str, Any]) -> bool:
+    expected_title = normalize_kind(str(candidate.get("title", "")))
+    actual_title = normalize_kind(str(track.get("title", "")))
+    if not expected_title or not actual_title:
+        return False
+    if expected_title not in actual_title and actual_title not in expected_title:
+        return False
+    expected_artist = normalize_kind(str(candidate.get("artist", "")))
+    actual_artist = normalize_kind(str(track.get("artist", "")))
+    if expected_artist and actual_artist:
+        return expected_artist in actual_artist or actual_artist in expected_artist
+    return True
+
+
 def rank_music_candidates(query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Score candidates deterministically by simple heuristics.
 
@@ -127,6 +142,9 @@ def rank_music_candidates(query: str, candidates: List[Dict[str, Any]]) -> List[
         if "official" in [b.lower() for b in badges]:
             score += 0.15
 
+        if normalize_kind(str(c.get("kind", ""))) == "song":
+            score += 0.15
+
         # penalize live/cover/remix
         if is_variant_candidate(c):
             score -= 1.0 if original_requested else 0.2
@@ -146,19 +164,35 @@ def extract_candidates_from_visible_text(text: str, limit: int = 8) -> List[Dict
         if line.strip() and line.strip() != "•"
     ]
     candidates = []
-    for index, line in enumerate(lines[:-1]):
-        meta = lines[index + 1]
-        parts = [part.strip() for part in meta.split("•")]
-        if not parts:
+    for index, line in enumerate(lines):
+        inline_parts = [part.strip() for part in line.split("•")]
+        inline_kind = canonical_kind(inline_parts[0]) if inline_parts else None
+        if inline_kind and "•" in line and index > 0:
+            candidates.append(
+                {
+                    "title": lines[index - 1],
+                    "artist": inline_parts[1] if len(inline_parts) > 1 else "",
+                    "badges": [],
+                    "kind": inline_kind,
+                }
+            )
+            if len(candidates) >= limit:
+                break
             continue
-        kind = canonical_kind(parts[0])
+        kind_index = next(
+            (candidate_index for candidate_index in range(index + 1, min(len(lines), index + 5)) if canonical_kind(lines[candidate_index])),
+            None,
+        )
+        if kind_index is None:
+            continue
+        kind = canonical_kind(lines[kind_index])
         if not kind:
             continue
-        artist = parts[1] if len(parts) > 1 else ""
-        if not artist and index + 2 < len(lines):
-            next_line = lines[index + 2]
-            if not canonical_kind(next_line) and "reproducciones" not in next_line.lower():
-                artist = next_line
+        artist = ""
+        for candidate_line in lines[kind_index + 1 : kind_index + 4]:
+            if candidate_line and not canonical_kind(candidate_line) and "reproducciones" not in candidate_line.lower() and not re.match(r"^\d+[\d,.]*$", candidate_line):
+                artist = candidate_line
+                break
         candidates.append({"title": line, "artist": artist, "badges": [], "kind": kind})
         if len(candidates) >= limit:
             break
@@ -197,6 +231,7 @@ class YouTubeMusic:
     def __init__(self, browser, state: Optional[Any] = None):
         self.browser = browser
         self.state = state
+        self._active_deadline: Optional[float] = None
 
     def _remember_search(self, query: str, candidates: List[Dict[str, Any]], index: int = 0):
         if not self.state:
@@ -227,6 +262,13 @@ class YouTubeMusic:
             return bar
         except Exception:
             return None
+
+    def _action_deadline(self) -> float:
+        return time.monotonic() + _env_int("APOLO_MUSIC_ACTION_TIMEOUT_SECONDS", 5)
+
+    @staticmethod
+    def _remaining_timeout(deadline: float) -> int:
+        return max(1, int((deadline - time.monotonic()) * 1000))
 
     def get_current_track(self) -> Dict[str, Any]:
         page = self.browser._page
@@ -278,12 +320,13 @@ class YouTubeMusic:
 
     def pause(self) -> Dict[str, Any]:
         page = self.browser._page
+        deadline = self._action_deadline()
         if self._click_player_button(["Pause", "Pausar"]):
-            time.sleep(0.2)
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
             return {"ok": True}
         try:
             btn = page.get_by_role("button", name=re.compile("Pause|Pausar", re.I))
-            btn.click(timeout=1000)
+            btn.click(timeout=self._remaining_timeout(deadline))
             time.sleep(0.2)
             return {"ok": True}
         except Exception:
@@ -294,7 +337,7 @@ class YouTubeMusic:
                     bar.locator(
                         'tp-yt-paper-icon-button[title="Pause"], '
                         'tp-yt-paper-icon-button[title="Pausar"]'
-                    ).click(timeout=1000)
+                    ).click(timeout=self._remaining_timeout(deadline))
                     time.sleep(0.2)
                     return {"ok": True}
             except Exception as e:
@@ -303,12 +346,13 @@ class YouTubeMusic:
 
     def resume(self) -> Dict[str, Any]:
         page = self.browser._page
+        deadline = self._action_deadline()
         if self._click_player_button(["Play", "Reproducir"]):
             time.sleep(0.2)
             return {"ok": True}
         try:
             btn = page.get_by_role("button", name=re.compile("Play|Reproducir", re.I))
-            btn.click(timeout=1000)
+            btn.click(timeout=self._remaining_timeout(deadline))
             time.sleep(0.2)
             return {"ok": True}
         except Exception:
@@ -318,7 +362,7 @@ class YouTubeMusic:
                     bar.locator(
                         'tp-yt-paper-icon-button[title="Play"], '
                         'tp-yt-paper-icon-button[title="Reproducir"]'
-                    ).click(timeout=1000)
+                    ).click(timeout=self._remaining_timeout(deadline))
                     time.sleep(0.2)
                     return {"ok": True}
             except Exception as e:
@@ -327,12 +371,13 @@ class YouTubeMusic:
 
     def next(self) -> Dict[str, Any]:
         page = self.browser._page
+        deadline = self._action_deadline()
         if self._click_player_button(["Next", "Siguiente"]):
             time.sleep(0.3)
             return {"ok": True}
         try:
             btn = page.get_by_role("button", name=re.compile("Next|Siguiente", re.I))
-            btn.click()
+            btn.click(timeout=self._remaining_timeout(deadline))
             time.sleep(0.3)
             return {"ok": True}
         except Exception:
@@ -342,7 +387,7 @@ class YouTubeMusic:
                     bar.locator(
                         'tp-yt-paper-icon-button[title="Next"], '
                         'tp-yt-paper-icon-button[title="Siguiente"]'
-                    ).click(timeout=1000)
+                    ).click(timeout=self._remaining_timeout(deadline))
                     time.sleep(0.3)
                     return {"ok": True}
             except Exception as e:
@@ -351,12 +396,13 @@ class YouTubeMusic:
 
     def previous(self) -> Dict[str, Any]:
         page = self.browser._page
+        deadline = self._action_deadline()
         if self._click_player_button(["Previous", "Anterior"]):
             time.sleep(0.3)
             return {"ok": True}
         try:
             btn = page.get_by_role("button", name=re.compile("Previous|Anterior", re.I))
-            btn.click()
+            btn.click(timeout=self._remaining_timeout(deadline))
             time.sleep(0.3)
             return {"ok": True}
         except Exception:
@@ -366,12 +412,40 @@ class YouTubeMusic:
                     bar.locator(
                         'tp-yt-paper-icon-button[title="Previous"], '
                         'tp-yt-paper-icon-button[title="Anterior"]'
-                    ).click(timeout=1000)
+                    ).click(timeout=self._remaining_timeout(deadline))
                     time.sleep(0.3)
                     return {"ok": True}
             except Exception as e:
                 return {"ok": False, "error": str(e)}
             return {"ok": False, "error": "previous button not found"}
+
+    def restart(self) -> Dict[str, Any]:
+        deadline = self._action_deadline()
+        try:
+            restarted = self.browser._page.evaluate(
+                """
+                () => {
+                    const media = document.querySelector('video, audio');
+                    if (!media) return false;
+                    media.currentTime = 0;
+                    return true;
+                }
+                """
+            )
+            if restarted:
+                return {"ok": True, "method": "media_current_time"}
+        except Exception:
+            pass
+        if self._click_player_button(["Restart", "Reiniciar"]):
+            return {"ok": True}
+        try:
+            button = self.browser._page.get_by_role(
+                "button", name=re.compile("Restart|Reiniciar", re.I)
+            )
+            button.click(timeout=self._remaining_timeout(deadline))
+            return {"ok": True}
+        except Exception as error:
+            return {"ok": False, "error": str(error)}
 
     def _click_player_button(self, label: Any) -> bool:
         try:
@@ -433,51 +507,55 @@ class YouTubeMusic:
         page = self.browser._page
         candidates = []
         query = None
-        deadline = time.monotonic() + _env_int("APOLO_MUSIC_ACTION_TIMEOUT_SECONDS", 20)
-        if isinstance(query_or_candidate, str):
-            query = query_or_candidate
-            candidates = self.search(query_or_candidate)
-            self._remember_search(query_or_candidate, candidates)
-        elif isinstance(query_or_candidate, dict):
-            candidates = [query_or_candidate]
-        elif isinstance(query_or_candidate, list):
-            candidates = query_or_candidate
-        else:
-            return {"ok": False, "error": "unsupported play argument"}
+        deadline = self._action_deadline()
+        self._active_deadline = deadline
+        try:
+            if isinstance(query_or_candidate, str):
+                query = query_or_candidate
+                candidates = self.search(query_or_candidate, deadline=deadline)
+                self._remember_search(query_or_candidate, candidates)
+            elif isinstance(query_or_candidate, dict):
+                candidates = [query_or_candidate]
+            elif isinstance(query_or_candidate, list):
+                candidates = query_or_candidate
+            else:
+                return {"ok": False, "error": "unsupported play argument"}
 
-        if not candidates:
-            return {"ok": False, "error": "no candidates found"}
+            if not candidates:
+                return {"ok": False, "error": "no candidates found"}
 
-        indexed_candidates = list(enumerate(candidates))
-        if query is not None:
-            min_score = _min_auto_score()
-            indexed_candidates = [
-                (index, cand)
-                for index, cand in indexed_candidates
-                if (_candidate_score(cand) is None or _candidate_score(cand) >= min_score)
-            ]
-            if not indexed_candidates:
-                return {
-                    "ok": False,
-                    "error": "low confidence music candidate",
-                    "query": query,
-                    "min_score": min_score,
-                    "best_candidate": candidates[0],
-                }
+            indexed_candidates = list(enumerate(candidates))
+            if query is not None:
+                min_score = _min_auto_score()
+                indexed_candidates = [
+                    (index, cand)
+                    for index, cand in indexed_candidates
+                    if (_candidate_score(cand) is None or _candidate_score(cand) >= min_score)
+                ]
+                if not indexed_candidates:
+                    return {
+                        "ok": False,
+                        "error": "low confidence music candidate",
+                        "query": query,
+                        "min_score": min_score,
+                        "best_candidate": candidates[0],
+                    }
 
-        tries = 0
-        for index, cand in indexed_candidates:
-            if time.monotonic() >= deadline:
-                return {"ok": False, "error": "music action timeout"}
-            if tries >= max_tries:
-                break
-            tries += 1
-            if self._play_candidate(cand):
-                if query is not None:
-                    self._update_last_search_index(index)
-                return {"ok": True, "candidate": cand, "index": index}
+            tries = 0
+            for index, cand in indexed_candidates:
+                if time.monotonic() >= deadline:
+                    return {"ok": False, "error": "music action timeout"}
+                if tries >= max_tries:
+                    break
+                tries += 1
+                if self._play_candidate(cand):
+                    if query is not None:
+                        self._update_last_search_index(index)
+                    return {"ok": True, "candidate": cand, "index": index}
 
-        return {"ok": False, "error": "could not start playback"}
+            return {"ok": False, "error": "could not start playback"}
+        finally:
+            self._active_deadline = None
 
     def _play_candidate(self, cand: Dict[str, Any]) -> bool:
         page = self.browser._page
@@ -537,36 +615,33 @@ class YouTubeMusic:
         retries = _env_int("APOLO_MUSIC_VERIFY_RETRIES", 5)
         delay = _env_float("APOLO_MUSIC_VERIFY_DELAY_SECONDS", 0.7)
         for _ in range(retries):
+            if self._active_deadline is not None and time.monotonic() >= self._active_deadline:
+                return False
             if self._verify_playback(cand, strict=strict):
                 return True
-            time.sleep(delay)
+            remaining = (
+                self._active_deadline - time.monotonic()
+                if self._active_deadline is not None
+                else delay
+            )
+            time.sleep(min(delay, max(0, remaining)))
         return False
 
     def _verify_playback(self, cand: Dict[str, Any], strict: bool = True) -> bool:
         info = self.get_current_track()
         if not info.get("ok"):
             return False
-        expected_title = cand.get("title", "").lower()
-        expected_artist = cand.get("artist", "").lower()
-        actual_title = info.get("title", "").lower()
-        actual_artist = info.get("artist", "").lower()
         if not strict:
-            title_matches = bool(
-                expected_title and actual_title and (
-                    expected_title in actual_title or actual_title in expected_title
-                )
-            )
-            artist_matches = bool(
-                expected_artist and actual_artist and (
-                    expected_artist in actual_artist or actual_artist in expected_artist
-                )
-            )
-            return title_matches or artist_matches
-        return bool(
-            expected_title
-            and actual_title
-            and (expected_title in actual_title or actual_title in expected_title)
-        )
+            expected_title = normalize_kind(str(cand.get("title", "")))
+            actual_title = normalize_kind(str(info.get("title", "")))
+            expected_artist = normalize_kind(str(cand.get("artist", "")))
+            actual_artist = normalize_kind(str(info.get("artist", "")))
+            return bool(
+                expected_title
+                and actual_title
+                and (expected_title in actual_title or actual_title in expected_title)
+            ) or bool(expected_artist and actual_artist and expected_artist in actual_artist)
+        return track_matches_candidate(cand, info)
 
     def _click_visible_play_button(self, title: str) -> bool:
         page = self.browser._page
@@ -578,8 +653,10 @@ class YouTubeMusic:
                 )
                 return True
         except Exception:
-            pass
+            return False
 
+        if title:
+            return False
         try:
             page.get_by_role("button", name=re.compile("Play|Reproducir", re.I)).first.click(
                 timeout=2000
@@ -697,8 +774,10 @@ class YouTubeMusic:
             return {"ok": True, "candidate": candidates[index], "index": index}
         return {"ok": False, "error": "could not start playback", "index": index}
 
-    def search(self, query: str) -> List[Dict[str, Any]]:
-        timeout_seconds = _env_int("APOLO_MUSIC_SEARCH_TIMEOUT_SECONDS", 12)
+    def search(self, query: str, deadline: Optional[float] = None) -> List[Dict[str, Any]]:
+        timeout_seconds = _env_int("APOLO_MUSIC_SEARCH_TIMEOUT_SECONDS", 5)
+        if deadline is not None:
+            timeout_seconds = max(1, min(timeout_seconds, int(deadline - time.monotonic())))
         search_query = clean_music_query(query)
         url = f"https://music.youtube.com/search?q={quote_plus(search_query)}"
         self.browser.open(url, timeout=timeout_seconds, wait_until="domcontentloaded")
