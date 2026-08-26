@@ -21,6 +21,7 @@ class IntentSpec:
     optional_entities: tuple[str, ...] = ()
     tool_handler: str = ""
     validation_rules: tuple[str, ...] = ()
+    voice_aliases: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass
@@ -106,6 +107,13 @@ class IntentRegistry:
     def tool_for(self, name: str) -> str:
         spec = self.get(name)
         return spec.tool_handler if spec else ""
+
+    def simple_aliases(self) -> Dict[str, tuple[str, float]]:
+        aliases: Dict[str, tuple[str, float]] = {}
+        for spec in self._specs.values():
+            for alias, confidence in spec.voice_aliases:
+                aliases[alias] = (spec.name, confidence)
+        return aliases
 
 
 class ConversationContext:
@@ -315,32 +323,7 @@ class DeterministicIntentResolver:
         return _unknown(raw_text, normalized_text, 0.25, "not a command")
 
     def _simple_control(self, raw_text: str, normalized_text: str) -> Optional[InterpretedCommand]:
-        controls = {
-            "pausa": ("pause_music", 0.98),
-            "pausar": ("pause_music", 0.97),
-            "pause": ("pause_music", 0.96),
-            "reanuda": ("resume_music", 0.97),
-            "continua": ("resume_music", 0.97),
-            "continuar": ("resume_music", 0.96),
-            "resume": ("resume_music", 0.96),
-            "siguiente": ("next_track", 0.98),
-            "siguiente cancion": ("next_track", 0.98),
-            "proxima": ("next_track", 0.96),
-            "proxima cancion": ("next_track", 0.97),
-            "cancion siguiente": ("next_track", 0.96),
-            "next": ("next_track", 0.96),
-            "anterior": ("previous_track", 0.98),
-            "anterior cancion": ("previous_track", 0.98),
-            "cancion anterior": ("previous_track", 0.96),
-            "previous": ("previous_track", 0.96),
-            "reinicia": ("restart_track", 0.98),
-            "reiniciar": ("restart_track", 0.97),
-            "reinicia la cancion": ("restart_track", 0.96),
-            "esa no": ("next_track", 0.94),
-            "otra": ("next_track", 0.86),
-            "que suena": ("current_track", 0.95),
-            "que esta sonando": ("current_track", 0.95),
-        }
+        controls = self.registry.simple_aliases()
         if normalized_text in controls:
             intent, confidence = controls[normalized_text]
             entities = {"variant": normalized_text} if normalized_text in {"esa no", "otra"} else {}
@@ -939,12 +922,45 @@ def _looks_like_codex_status_question(normalized: str) -> bool:
 
 DEFAULT_INTENTS = (
     IntentSpec("play_music", (), ("query", "artist", "album", "platform"), "youtube_music.play"),
-    IntentSpec("pause_music", tool_handler="youtube_music.pause"),
-    IntentSpec("resume_music", tool_handler="youtube_music.resume"),
-    IntentSpec("next_track", tool_handler="youtube_music.next"),
-    IntentSpec("previous_track", tool_handler="youtube_music.previous"),
-    IntentSpec("restart_track", tool_handler="youtube_music.restart"),
-    IntentSpec("current_track", tool_handler="youtube_music.get_current_track"),
+    IntentSpec(
+        "pause_music",
+        tool_handler="youtube_music.pause",
+        voice_aliases=(("pausa", 0.98), ("pausar", 0.97), ("pause", 0.96)),
+    ),
+    IntentSpec(
+        "resume_music",
+        tool_handler="youtube_music.resume",
+        voice_aliases=(("reanuda", 0.97), ("continua", 0.97), ("continuar", 0.96), ("resume", 0.96)),
+    ),
+    IntentSpec(
+        "next_track",
+        tool_handler="youtube_music.next",
+        voice_aliases=(
+            ("siguiente", 0.98),
+            ("siguiente cancion", 0.98),
+            ("proxima", 0.96),
+            ("proxima cancion", 0.97),
+            ("cancion siguiente", 0.96),
+            ("next", 0.96),
+            ("esa no", 0.94),
+            ("otra", 0.86),
+        ),
+    ),
+    IntentSpec(
+        "previous_track",
+        tool_handler="youtube_music.previous",
+        voice_aliases=(("anterior", 0.98), ("anterior cancion", 0.98), ("cancion anterior", 0.96), ("previous", 0.96)),
+    ),
+    IntentSpec(
+        "restart_track",
+        tool_handler="youtube_music.restart",
+        voice_aliases=(("reinicia", 0.98), ("reiniciar", 0.97), ("reinicia la cancion", 0.96)),
+    ),
+    IntentSpec(
+        "current_track",
+        tool_handler="youtube_music.get_current_track",
+        voice_aliases=(("que suena", 0.95), ("que esta sonando", 0.95)),
+    ),
     IntentSpec("set_volume", optional_entities=("level", "direction")),
     IntentSpec("web_search", ("query",), tool_handler="web.search_google"),
     IntentSpec("web_open", ("target",), tool_handler="web.open"),

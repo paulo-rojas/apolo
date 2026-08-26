@@ -1,6 +1,6 @@
 from core.state import State
 from voice.command_router import ActionPlanner, normalize_command, route_command
-from voice.interpretation import IntentRegistry, IntentSpec, InterpretedCommand
+from voice.interpretation import DeterministicIntentResolver, IntentRegistry, IntentSpec, InterpretedCommand
 
 
 def test_music_variants_converge_to_play_music():
@@ -207,6 +207,28 @@ def test_short_asr_variants_use_fuzzy_intent_matching():
     assert continua["interpretation"]["source"] == "asr_fuzzy"
     assert siguiente["tool"] == "youtube_music.next"
     assert siguiente["interpretation"]["source"] == "asr_fuzzy"
+
+
+def test_short_alias_matching_comes_from_intent_registry():
+    registry = IntentRegistry(
+        [
+            IntentSpec(
+                "mute_music",
+                tool_handler="youtube_music.mute",
+                voice_aliases=(("silencio", 0.97),),
+            )
+        ]
+    )
+    resolver = DeterministicIntentResolver(registry)
+
+    exact = resolver.interpret("silencio", "silencio")
+    fuzzy = resolver.interpret("silensio", "silensio")
+
+    assert exact.intent == "mute_music"
+    assert exact.source == "alias"
+    assert fuzzy.intent == "mute_music"
+    assert fuzzy.normalized_text == "silencio"
+    assert fuzzy.source == "asr_fuzzy"
 
 
 def test_application_open_and_correction():
