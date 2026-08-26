@@ -23,6 +23,20 @@ class FakeYouTubeMusic(YouTubeMusic):
         return cand["title"] in self.playable_titles
 
 
+class SearchResultYouTubeMusic(YouTubeMusic):
+    def __init__(self, candidates):
+        super().__init__(FakeBrowser())
+        self.candidates = candidates
+        self.played = []
+
+    def search(self, query):
+        return self.candidates
+
+    def _play_candidate(self, cand):
+        self.played.append(cand)
+        return True
+
+
 class FakeCurrentTrackYouTubeMusic(YouTubeMusic):
     def __init__(self, info):
         super().__init__(FakeBrowser())
@@ -172,10 +186,43 @@ def test_candidate_from_multiline_spanish_video_block_text():
     }
 
 
+def test_play_rejects_low_confidence_search_candidate(monkeypatch):
+    monkeypatch.setenv("APOLO_MUSIC_MIN_AUTO_SCORE", "0.35")
+    player = SearchResultYouTubeMusic(
+        [{"title": "Barca, Barca, Barca", "artist": "Marcolinski", "score": 0.2}]
+    )
+
+    result = player.play("no de rinking barca")
+
+    assert result["ok"] is False
+    assert result["error"] == "low confidence music candidate"
+    assert result["best_candidate"]["title"] == "Barca, Barca, Barca"
+    assert player.played == []
+
+
+def test_play_accepts_high_confidence_search_candidate(monkeypatch):
+    monkeypatch.setenv("APOLO_MUSIC_MIN_AUTO_SCORE", "0.35")
+    player = SearchResultYouTubeMusic(
+        [{"title": "Numb", "artist": "Linkin Park", "score": 0.8}]
+    )
+
+    result = player.play("numb de linkin park")
+
+    assert result["ok"] is True
+    assert result["candidate"]["title"] == "Numb"
+    assert player.played == [{"title": "Numb", "artist": "Linkin Park", "score": 0.8}]
+
+
 def test_verify_playback_returns_bool_for_matching_track():
     player = FakeCurrentTrackYouTubeMusic({"ok": True, "title": "Everlong", "artist": "Foo Fighters"})
 
     assert player._verify_playback({"title": "Everlong"}) is True
+
+
+def test_verify_playback_non_strict_still_rejects_unrelated_current_track():
+    player = FakeCurrentTrackYouTubeMusic({"ok": True, "title": "Other Song", "artist": "Other"})
+
+    assert player._verify_playback({"title": "Numb", "artist": "Linkin Park"}, strict=False) is False
 
 
 def test_wait_for_playback_retries(monkeypatch):
