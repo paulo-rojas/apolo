@@ -1,7 +1,9 @@
 import argparse
+import atexit
 from datetime import datetime
 import json
 import os
+import queue
 import shutil
 import subprocess
 import wave
@@ -25,6 +27,10 @@ from .audio_devices import selected_device
 from .wake_word import strip_wake_word
 
 
+class RealtimeSttTimeout(RuntimeError):
+    pass
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -36,6 +42,7 @@ def main():
     parser.add_argument("--language", default=get_str("whisper.language", "es"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--continuous", action="store_true")
+    parser.add_argument("--dictate", action="store_true", help="Transcribe speech without wake word or command routing.")
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--silence-ms", type=int, default=None)
     parser.add_argument("--block-ms", type=int, default=None)
@@ -44,6 +51,8 @@ def main():
     parser.add_argument("--transcriber", choices=("faster-whisper", "whisper-cpp", "realtime-stt", "realtimestt"), default=None)
     parser.add_argument("--diagnose", action="store_true")
     args = parser.parse_args()
+    if args.dictate:
+        os.environ["APOLO_VOICE_DICTATION"] = "1"
 
     wav_path = wav_path_for_voice_command(tempfile.gettempdir())
     vad_config = VadConfig(
@@ -60,6 +69,9 @@ def main():
     use_realtime_stt = _is_realtime_stt_backend(transcriber_name)
     fallback_transcriber_name = get_str("realtime_stt.fallback_backend", "faster-whisper") or "faster-whisper"
     transcriber = None if use_realtime_stt else create_speech_to_text_provider(transcriber_name)
+    realtime_session = RealtimeSttSession(wav_path, args.language) if use_realtime_stt and args.continuous else None
+    if realtime_session is not None:
+        atexit.register(realtime_session.close)
     print(f"voice listener: starting mode={mode} transcriber={transcriber_name} block_ms={vad_config.block_ms} transcribe_timeout={transcribe_timeout}s", flush=True)
     if args.diagnose:
         _diagnose_audio(transcriber_name, transcriber)
@@ -106,11 +118,23 @@ def main():
             started_at = time.monotonic()
             if use_realtime_stt:
                 try:
-                    result = _listen_with_realtime_stt(wav_path, args.language)
+                    if realtime_session is None or not realtime_session.ready:
+                        print("voice listener: preparing realtime-stt", flush=True)
+                    result = (
+                        realtime_session.listen()
+                        if realtime_session is not None
+                        else _listen_with_realtime_stt(wav_path, args.language)
+                    )
                     transcript = result["text"]
                     duration_ms = int(result.get("duration_ms", 0))
                     elapsed_ms = int(result.get("elapsed_ms", int((time.monotonic() - started_at) * 1000)))
                     backend_label = str(result.get("backend") or "realtime-stt")
+                except RealtimeSttTimeout as error:
+                    print(f"voice listener: {error}; no fallback recording attempted", flush=True)
+                    write_log("VOICE", f"realtime-stt timeout: {error}")
+                    if args.continuous:
+                        continue
+                    break
                 except Exception as error:
                     print(f"voice listener: realtime-stt failed; falling back to {fallback_transcriber_name}: {error}", flush=True)
                     write_log("VOICE", f"realtime-stt failed; fallback={fallback_transcriber_name}: {error}")
@@ -143,16 +167,38 @@ def main():
                 continue
             if _wake_detected(transcript):
                 print("voice listener: wake detected", flush=True)
-            payload = json.dumps({"text": transcript, "duration_ms": duration_ms, "dry_run": args.dry_run}).encode("utf-8")
-            request = urllib.request.Request(
-                f"{args.server.rstrip('/')}/voice-command",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=60) as response:
-                response_text = response.read().decode("utf-8")
-                print(response_text)
+            if args.dictate:
+                response_text = json.dumps(
+                    {"ok": True, "kind": "dictation", "text": transcript, "duration_ms": duration_ms},
+                    ensure_ascii=False,
+                )
+                print(response_text, flush=True)
+                continue
+            if args.dry_run:
+                response_text = json.dumps(
+                    _interpret_dry_run(transcript, duration_ms),
+                    ensure_ascii=False,
+                )
+                print(response_text, flush=True)
+                _maybe_save_training_sample(
+                    wav_path,
+                    transcript=transcript,
+                    response_text=response_text,
+                    duration_ms=duration_ms,
+                    elapsed_ms=elapsed_ms,
+                    backend_label=backend_label,
+                )
+            else:
+                payload = json.dumps({"text": transcript, "duration_ms": duration_ms, "dry_run": args.dry_run}).encode("utf-8")
+                request = urllib.request.Request(
+                    f"{args.server.rstrip('/')}/voice-command",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    response_text = response.read().decode("utf-8")
+                    print(response_text)
             _maybe_save_training_sample(
                 wav_path,
                 transcript=transcript,
@@ -173,6 +219,18 @@ def main():
             threading.Event().wait(1)
         if not args.continuous:
             break
+    if realtime_session is not None:
+        realtime_session.close()
+
+
+def _interpret_dry_run(transcript: str, duration_ms: int) -> dict:
+    from core.state import State
+    from voice.gateway import VoiceGateway
+
+    return VoiceGateway(State()).handle_transcript(
+        transcript,
+        duration_ms=duration_ms,
+    )
 
 
 def _hotkey_is_pressed(keyboard, hotkey: str) -> bool:
@@ -222,24 +280,191 @@ def _listen_with_realtime_stt(wav_path: Path, language: str) -> dict:
         minimum=3,
     )
     command = _realtime_stt_command(wav_path, language)
-    completed = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=str(PROJECT_ROOT),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout_seconds,
     )
-    result = _parse_realtime_stt_result(completed.stdout)
-    if completed.returncode != 0 or not result.get("ok"):
-        detail = result.get("error") or completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+    output_lines: list[str] = []
+    reader = threading.Thread(
+        target=_read_realtime_stt_output,
+        args=(process, output_lines),
+        daemon=True,
+    )
+    reader.start()
+    try:
+        returncode = process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as error:
+        _terminate_realtime_process(process)
+        reader.join(timeout=1)
+        raise RealtimeSttTimeout(
+            f"realtime-stt timed out after {timeout_seconds}s; no final phrase was detected"
+        ) from error
+    except KeyboardInterrupt:
+        _terminate_realtime_process(process)
+        reader.join(timeout=1)
+        print("voice listener: stopped", flush=True)
+        raise
+    reader.join(timeout=1)
+    result = _parse_realtime_stt_result("\n".join(output_lines))
+    if returncode != 0 or not result.get("ok"):
+        detail = result.get("error") or "\n".join(output_lines).strip() or f"exit {returncode}"
         raise RuntimeError(detail)
     return result
 
 
-def _realtime_stt_command(wav_path: Path, language: str) -> list[str]:
-    return [
+def _terminate_realtime_process(process) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _read_realtime_stt_output(process, output_lines: list[str]) -> None:
+    if process.stdout is None:
+        return
+    for raw_line in process.stdout:
+        line = raw_line.strip()
+        if not line:
+            continue
+        output_lines.append(line)
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("event") == "partial":
+            print(f"voice listener: partial: {event.get('text', '')}", flush=True)
+        elif isinstance(event, dict) and event.get("event") == "ready":
+            print("voice listener: realtime-stt ready; speak now", flush=True)
+
+
+class RealtimeSttSession:
+    def __init__(self, wav_path: Path, language: str):
+        self.wav_path = wav_path
+        self.language = language
+        self.timeout_seconds = _realtime_stt_timeout_seconds()
+        self.process = None
+        self.events: queue.Queue[dict] = queue.Queue()
+        self.reader = None
+        self.ready = False
+
+    def listen(self) -> dict:
+        self._ensure_started()
+        if not self.ready:
+            self._wait_until_ready()
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.restart()
+                raise RealtimeSttTimeout(
+                    f"realtime-stt timed out after {self.timeout_seconds}s; no final phrase was detected"
+                )
+            try:
+                event = self.events.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                if self.process and self.process.poll() is not None:
+                    self.ready = False
+                    raise RuntimeError(f"realtime-stt exited with code {self.process.returncode}")
+                continue
+            if event.get("event") in {"ready", "partial"}:
+                continue
+            if event.get("ok"):
+                return event
+            raise RuntimeError(event.get("error") or "realtime-stt failed")
+
+    def restart(self) -> None:
+        self.close()
+        self._ensure_started()
+
+    def close(self) -> None:
+        if self.process is not None:
+            _terminate_realtime_process(self.process)
+        if self.reader is not None:
+            self.reader.join(timeout=1)
+        self.process = None
+        self.reader = None
+        self.ready = False
+        self.events = queue.Queue()
+
+    def _ensure_started(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            return
+        self.ready = False
+        self.process = subprocess.Popen(
+            _realtime_stt_command(self.wav_path, self.language, loop=True),
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.reader = threading.Thread(target=self._read_output, daemon=True)
+        self.reader.start()
+
+    def _wait_until_ready(self) -> None:
+        deadline = time.monotonic() + self.timeout_seconds
+        while not self.ready:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.restart()
+                raise RealtimeSttTimeout(
+                    f"realtime-stt timed out after {self.timeout_seconds}s before it became ready"
+                )
+            try:
+                event = self.events.get(timeout=min(0.25, remaining))
+            except queue.Empty:
+                if self.process and self.process.poll() is not None:
+                    raise RuntimeError(f"realtime-stt exited with code {self.process.returncode}")
+                continue
+            if event.get("event") == "ready":
+                self.ready = True
+                continue
+            if not event.get("ok", True):
+                raise RuntimeError(event.get("error") or "realtime-stt failed")
+
+    def _read_output(self) -> None:
+        if self.process is None or self.process.stdout is None:
+            return
+        for raw_line in self.process.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                print(line, flush=True)
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("event") == "partial":
+                print(f"voice listener: partial: {event.get('text', '')}", flush=True)
+            elif event.get("event") == "ready":
+                print("voice listener: realtime-stt ready; speak now", flush=True)
+            self.events.put(event)
+
+
+def _realtime_stt_timeout_seconds() -> int:
+    return get_int(
+        "realtime_stt.timeout_seconds",
+        get_int("voice.vad.max_utterance_ms", 8000, minimum=500) // 1000
+        + get_int("whisper.transcribe_timeout_seconds", 12, minimum=2)
+        + 5,
+        env="APOLO_REALTIMESTT_TIMEOUT_SECONDS",
+        minimum=3,
+    )
+
+
+def _realtime_stt_command(wav_path: Path, language: str, loop: bool = False) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "voice.realtime_stt_worker",
@@ -248,6 +473,9 @@ def _realtime_stt_command(wav_path: Path, language: str) -> list[str]:
         "--language",
         language or "es",
     ]
+    if loop:
+        command.append("--loop")
+    return command
 
 
 def _parse_realtime_stt_result(stdout: str) -> dict:
@@ -372,9 +600,10 @@ def _transcribe_with_timeout(transcriber, wav_path: Path, language: str, timeout
 
 def _diagnose_audio(transcriber_name: str, transcriber) -> None:
     try:
+        import numpy as np
         import sounddevice as sd
     except Exception as error:
-        print(f"voice listener: sounddevice unavailable: {error}", flush=True)
+        print(f"voice listener: audio diagnostics unavailable: {error}", flush=True)
         return
 
     try:
@@ -387,6 +616,36 @@ def _diagnose_audio(transcriber_name: str, transcriber) -> None:
     except Exception as error:
         print(f"voice listener: default input unavailable: {error}", flush=True)
 
+    try:
+        sample_rate = get_int("voice.vad.sample_rate", 16000, minimum=8000)
+        block_ms = get_int("voice.vad.block_ms", 40, minimum=10)
+        block_size = int(sample_rate * block_ms / 1000)
+        readings = []
+        print("voice listener: measuring mic level for 3s; stay quiet, then say Apolo once", flush=True)
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="int16",
+            blocksize=block_size,
+            device=selected_device("input"),
+        ) as stream:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                block, _ = stream.read(block_size)
+                readings.append(float(np.sqrt(np.mean((block.astype("float32") / 32768.0) ** 2))))
+        if readings:
+            p10, p50, p95, peak = np.percentile(readings, [10, 50, 95, 100])
+            current = get_float("voice.vad.threshold", 0.015, env="APOLO_VOICE_VAD_THRESHOLD", minimum=0.0)
+            recommended = max(0.006, min(0.05, float(p95) * 1.6))
+            print(
+                "voice listener: mic rms "
+                f"p10={p10:.4f} median={p50:.4f} p95={p95:.4f} peak={peak:.4f} "
+                f"current_threshold={current:.4f} suggested_threshold={recommended:.4f}",
+                flush=True,
+            )
+    except Exception as error:
+        print(f"voice listener: mic level check failed: {error}", flush=True)
+
     if transcriber_name == "faster-whisper":
         try:
             transcriber._ensure_model()
@@ -397,4 +656,7 @@ def _diagnose_audio(transcriber_name: str, transcriber) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("voice listener: stopped", flush=True)

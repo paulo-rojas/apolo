@@ -12,7 +12,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
 python -m pip install fastapi uvicorn playwright pytest PySide6 kokoro-onnx soundfile sounddevice numpy faster-whisper keyboard
-python -m pip install "RealtimeSTT[faster-whisper]"
+python -m pip install "RealtimeSTT[faster-whisper]" silero-vad
 python -m playwright install chromium
 ```
 

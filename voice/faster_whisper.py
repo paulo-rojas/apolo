@@ -5,7 +5,7 @@ import shutil
 import site
 from pathlib import Path
 
-from core.config import get_float, get_int, get_str
+from core.config import get_bool, get_float, get_int, get_str
 
 _DLL_DIRECTORY_HANDLES = []
 
@@ -25,8 +25,9 @@ class FasterWhisperTranscriber:
         self.fallback_compute_type = get_str("whisper.fallback_compute_type", "int8") or "int8"
         self.fallback_model_name = get_str("whisper.fallback_model", "small") or self.model_name
         self.beam_size = get_int("whisper.beam_size", 1, minimum=1)
-        self.prompt = get_str("whisper.prompt", None)
-        self.hotwords = get_str("whisper.hotwords", None)
+        dictation = get_bool("voice.dictation", False, env="APOLO_VOICE_DICTATION")
+        self.prompt = None if dictation else get_str("whisper.prompt", None)
+        self.hotwords = None if dictation else get_str("whisper.hotwords", None)
         self.max_new_tokens = get_int("whisper.max_new_tokens", 32, minimum=4)
         self.patience = get_float("whisper.patience", 1.0, minimum=0.0)
         self.cpu_threads = get_int("whisper.cpu_threads", get_int("whisper.threads", 4, minimum=1), minimum=1)
