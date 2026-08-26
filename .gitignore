@@ -4,6 +4,7 @@ __pycache__/
 
 .pytest_cache/
 .venv/
+logs/
 
 memory/
 *.db
@@ -12,6 +13,7 @@ apolo_screenshot.png
 apolo_click_error.png
 ytmusic_*.png
 uvicorn.*.log
+runtime/
 
 config/apolo.json
 

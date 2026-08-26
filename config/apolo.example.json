@@ -1,4 +1,16 @@
 {
+  "audio": {
+    "input_device": "default",
+    "output_device": "default"
+  },
+  "logs": {
+    "dir": "C:\\apolo\\logs"
+  },
+  "memory": {
+    "dir": "C:\\apolo\\memory",
+    "allow_codex_write": true,
+    "repetitive_threshold": 2
+  },
   "browser": {
     "profile": "%USERPROFILE%\\.apolo-profile",
     "profile_directory": null,
@@ -22,31 +34,66 @@
     "verify_delay_seconds": 0.7
   },
   "voice": {
+    "mode": "open",
+    "hotkey": "ctrl+space",
     "session_timeout_seconds": 20,
+    "computer_audio_guard_seconds": 3600,
     "min_confidence": 0.45,
     "min_duration_ms": 250,
     "vad": {
       "sample_rate": 16000,
       "threshold": 0.015,
+      "block_ms": 40,
       "silence_ms": 700,
+      "pre_roll_ms": 240,
       "max_utterance_ms": 8000
+    },
+    "monitor": {
+      "sensitivity": 30.0,
+      "noise_floor": 0.004,
+      "activity_threshold": 0.025
     }
   },
+  "nlu": {
+    "execute_confidence": 0.85,
+    "retry_confidence": 0.60,
+    "context_ttl_seconds": 180
+  },
   "whisper": {
+    "backend": "faster-whisper",
     "executable": "C:\\ruta\\a\\whisper-cli.exe",
-    "model": "large-v3",
-    "model_path": "C:\\ruta\\a\\models\\ggml-large-v3.bin",
+    "model": "base",
+    "model_path": "C:\\ruta\\a\\models\\ggml-medium.bin",
+    "preload": true,
+    "threads": 8,
     "language": "es",
-    "prompt": "Apolo. Comandos de voz en español para música: pon, reproduce, pausa, continua, siguiente, anterior, esa no, que suena."
+    "timeout_seconds": 120,
+    "device": "cuda",
+    "compute_type": "float16",
+    "fallback_model": "base",
+    "fallback_device": "cpu",
+    "fallback_compute_type": "int8",
+    "beam_size": 1,
+    "transcribe_timeout_seconds": 7,
+    "max_new_tokens": 32,
+    "hotwords": "apolov2, Apolo v2, Apolo, Apollo, hola apolov2, hola Apolo, pon, reproduce, pausa, continúa, siguiente, anterior, esa no, qué suena, Codex",
+    "prompt": "Frases cortas en español para un asistente llamado apolov2. El usuario suele empezar con apolov2, Apolo v2, Apolo u hola Apolo. Comandos: pon, reproduce, pausa, continua, siguiente, anterior, esa no, que suena, me escuchas, conexion con Codex."
+  },
+  "kokoro": {
+    "model_path": "C:\\apolo\\models\\kokoro\\kokoro-v1.0.onnx",
+    "voices_path": "C:\\apolo\\models\\kokoro\\voices-v1.0.bin",
+    "voice": "em_alex",
+    "speed": 1.0
   },
   "codex": {
     "enabled": false,
     "executable": "codex",
-    "model": null,
+    "model": "gpt-5.6-luna",
     "timeout_seconds": 30,
     "sandbox": "read-only",
     "approval": "never",
     "cwd": "C:\\apolo",
-    "auto_execute_tools": false
+    "agent_prompt_path": "agents/apolo_codex.md",
+    "auto_execute_tools": true
   }
 }
