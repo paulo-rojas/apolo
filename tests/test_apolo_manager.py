@@ -86,6 +86,16 @@ def test_voice_json_wake_feedback_sets_attention_state():
     assert states[-1] == "Atento"
 
 
+def test_voice_json_repeat_feedback_sets_attention_state():
+    manager = ApoloManager()
+    states = []
+    manager.on("status_changed", states.append)
+
+    manager._handle_process_log("VOICE", '{"ok":true,"kind":"repeat","feedback":"repeat"}')
+
+    assert states[-1] == "Atento"
+
+
 def test_open_mode_listening_is_idle_until_voice_or_wake():
     manager = ApoloManager()
     states = []
@@ -158,3 +168,29 @@ def test_speech_mute_duration_scales_with_text():
 
     assert _speech_mute_seconds("hola") >= 2.0
     assert _speech_mute_seconds("uno dos tres cuatro cinco seis") > _speech_mute_seconds("hola")
+
+
+def test_voice_listener_command_uses_configured_transcriber(tmp_path, monkeypatch):
+    from manager.apolo_manager import _voice_listener_command
+
+    config = tmp_path / "apolo.json"
+    config.write_text('{"whisper": {"backend": "faster-whisper"}}', encoding="utf-8")
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(config))
+
+    command = _voice_listener_command("http://127.0.0.1:8000", "open", "ctrl+space")
+
+    assert command[1:3] == ["-m", "voice.local_listener"]
+    assert "--transcriber" in command
+    assert command[command.index("--transcriber") + 1] == "faster-whisper"
+
+
+def test_voice_listener_command_can_use_realtime_stt(tmp_path, monkeypatch):
+    from manager.apolo_manager import _voice_listener_command
+
+    config = tmp_path / "apolo.json"
+    config.write_text('{"whisper": {"backend": "realtime-stt"}}', encoding="utf-8")
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(config))
+
+    command = _voice_listener_command("http://127.0.0.1:8000", "open", "ctrl+space")
+
+    assert command[command.index("--transcriber") + 1] == "realtime-stt"

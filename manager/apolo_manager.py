@@ -37,7 +37,7 @@ class ApoloManager:
         self._listeners: dict[str, list[Callable]] = {}
         self._services = {
             "Voz": ServiceStatus("Voz", ServiceState.READY, "Listener preparado"),
-            "Whisper": ServiceStatus("Whisper", ServiceState.READY, get_str("whisper.model", "small") or "small"),
+            "Whisper": ServiceStatus("Whisper", ServiceState.READY, _whisper_detail()),
             "Codex": ServiceStatus("Codex", ServiceState.READY, "Disponible"),
             "Browser": ServiceStatus("Browser", ServiceState.STOPPED, "Sin conexión CDP"),
             "YouTube Music": ServiceStatus("YouTube Music", ServiceState.STOPPED, "Offline"),
@@ -225,7 +225,7 @@ class ApoloManager:
         mode = get_str("voice.mode", "open") or "open"
         hotkey = get_str("voice.hotkey", "ctrl+space") or "ctrl+space"
         self._voice_process = subprocess.Popen(
-            [sys.executable, "-m", "voice.local_listener", "--server", "http://127.0.0.1:8000", "--continuous", "--mode", mode, "--hotkey", hotkey],
+            _voice_listener_command("http://127.0.0.1:8000", mode, hotkey),
             cwd=root,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -235,6 +235,7 @@ class ApoloManager:
             **hidden_subprocess_kwargs(),
         )
         self.set_service_status("Voz", ServiceState.READY, f"{mode} ({hotkey})")
+        self.set_service_status("Whisper", ServiceState.READY, _whisper_detail())
         self._pipe_process_logs("VOICE", self._voice_process)
 
     def _stop_voice_listener(self) -> None:
@@ -306,10 +307,13 @@ class ApoloManager:
             return
         lowered = message.lower()
         if "preloading faster-whisper" in lowered:
-            self.set_service_status("Whisper", ServiceState.READY, f"Cargando {get_str('whisper.model', 'medium')}")
+            self.set_service_status("Whisper", ServiceState.READY, f"Cargando {_whisper_detail()}")
             self._emit("status_changed", "Procesando")
         elif "faster-whisper ready" in lowered:
-            self.set_service_status("Whisper", ServiceState.READY, f"{get_str('whisper.model', 'medium')} listo")
+            self.set_service_status("Whisper", ServiceState.READY, f"{_whisper_detail()} listo")
+            self._emit("status_changed", "Activo")
+        elif "realtime-stt ready" in lowered:
+            self.set_service_status("Whisper", ServiceState.READY, "RealtimeSTT listo")
             self._emit("status_changed", "Activo")
         elif "waiting for" in lowered or "listening" in lowered:
             self._listener_accepts_voice = get_str("voice.mode", "open") == "open"
@@ -350,6 +354,9 @@ class ApoloManager:
         feedback = payload.get("feedback") or payload.get("parsed", {}).get("feedback")
         if feedback == "wake":
             self._emit("status_changed", "Atento")
+        elif feedback == "repeat":
+            self._listener_accepts_voice = get_str("voice.mode", "open") == "open"
+            self._emit("status_changed", "Atento")
         elif feedback == "processing":
             self._emit("status_changed", "Procesando")
 
@@ -387,3 +394,28 @@ def _listener_shutdown_requested() -> bool:
         return shutdown_requested()
     except Exception:
         return False
+
+
+def _whisper_detail() -> str:
+    backend = get_str("whisper.backend", "faster-whisper") or "faster-whisper"
+    model = get_str("whisper.model", "medium") or "medium"
+    compute = get_str("whisper.compute_type", "int8") or "int8"
+    return f"{backend} {model}/{compute}"
+
+
+def _voice_listener_command(server: str, mode: str, hotkey: str) -> list[str]:
+    transcriber = get_str("whisper.backend", "faster-whisper") or "faster-whisper"
+    return [
+        sys.executable,
+        "-m",
+        "voice.local_listener",
+        "--server",
+        server,
+        "--continuous",
+        "--mode",
+        mode,
+        "--hotkey",
+        hotkey,
+        "--transcriber",
+        transcriber,
+    ]

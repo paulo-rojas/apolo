@@ -12,6 +12,12 @@ CODEX_MODEL_OPTIONS = [
     ("Auto de Codex", "default"),
 ]
 
+VOICE_BACKEND_OPTIONS = [
+    ("Comandos rápidos (faster-whisper)", "faster-whisper"),
+    ("Dictado experimental (RealtimeSTT)", "realtime-stt"),
+    ("Whisper.cpp", "whisper-cpp"),
+]
+
 
 class SettingsPage(QWidget):
     def __init__(self, manager=None, parent=None):
@@ -28,10 +34,15 @@ class SettingsPage(QWidget):
         audio_title.setObjectName("eyebrow")
         layout.addWidget(audio_title)
         audio_form = QFormLayout()
+        self.voice_backend_combo = QComboBox()
         self.input_combo = QComboBox()
         self.output_combo = QComboBox()
+        for label, backend in VOICE_BACKEND_OPTIONS:
+            self.voice_backend_combo.addItem(label, backend)
+        self.voice_backend_combo.currentIndexChanged.connect(lambda _index: self._save_voice_backend())
         self.input_combo.currentIndexChanged.connect(lambda _index: self._save_device("input"))
         self.output_combo.currentIndexChanged.connect(lambda _index: self._save_device("output"))
+        audio_form.addRow("Reconocimiento", self.voice_backend_combo)
         audio_form.addRow("Entrada", self.input_combo)
         audio_form.addRow("Salida", self.output_combo)
         layout.addLayout(audio_form)
@@ -68,6 +79,8 @@ class SettingsPage(QWidget):
         layout.addStretch()
         self._loading_audio = False
         self._loading_codex = False
+        self._loading_voice_backend = False
+        self._load_voice_backend()
         self._load_audio_devices()
         self._load_codex_model()
 
@@ -88,6 +101,15 @@ class SettingsPage(QWidget):
         finally:
             self._loading_audio = False
 
+    def _load_voice_backend(self):
+        self._loading_voice_backend = True
+        try:
+            backend = get_str("whisper.backend", "faster-whisper") or "faster-whisper"
+            index = self.voice_backend_combo.findData(backend)
+            self.voice_backend_combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self._loading_voice_backend = False
+
     def _populate_combo(self, combo, devices, selected):
         combo.clear()
         combo.addItem("Predeterminado del sistema", "default")
@@ -103,6 +125,14 @@ class SettingsPage(QWidget):
         value = combo.currentData() or "default"
         set_config(f"audio.{kind}_device", value)
         if kind == "input" and self.manager is not None:
+            self.manager.restart()
+
+    def _save_voice_backend(self):
+        if self._loading_voice_backend:
+            return
+        value = self.voice_backend_combo.currentData() or "faster-whisper"
+        set_config("whisper.backend", value)
+        if self.manager is not None:
             self.manager.restart()
 
     def _load_codex_model(self):
