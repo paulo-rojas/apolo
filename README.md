@@ -1,6 +1,6 @@
-# apolo
+# apolov2
 
-Apolo es un agente personal local, open source y orientado al uso diario. Este directorio (`C:\apolo` en este entorno) es la ubicación canónica del proyecto.
+apolov2 es un agente personal local, open source y orientado al uso diario. Este directorio (`C:\apolo` en este entorno) es la ubicación canónica del proyecto.
 
 ## Instalación
 
@@ -10,7 +10,7 @@ Requiere Python 3.11+.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
-python -m pip install fastapi uvicorn playwright pytest
+python -m pip install fastapi uvicorn playwright pytest PySide6 kokoro-onnx soundfile sounddevice numpy faster-whisper keyboard
 python -m playwright install chromium
 ```
 
@@ -56,7 +56,7 @@ También puedes habilitar Codex CLI como cerebro bajo demanda:
 }
 ```
 
-Con `auto_execute_tools=false`, Apolo solo devuelve la propuesta de Codex. Con `true`, ejecuta herramientas MCP permitidas cuando Codex devuelve una respuesta `{"kind":"mcp", ...}`.
+Con `auto_execute_tools=false`, apolov2 solo devuelve la propuesta de Codex. Con `true`, ejecuta herramientas MCP permitidas cuando Codex devuelve una respuesta `{"kind":"mcp", ...}`.
 
 Las variables de entorno siguen funcionando como override:
 
@@ -70,7 +70,7 @@ Las variables de entorno siguen funcionando como override:
 - `APOLO_BROWSER_EXECUTABLE`: ruta exacta al navegador permitido.
 - `APOLO_BROWSER_EXECUTABLES_FILE`: ruta a un JSON con navegadores permitidos. Por defecto lee `config/browser_executables.json`.
 - `APOLO_BROWSER_NAME`: nombre del navegador dentro del JSON.
-- `APOLO_BROWSER_REQUIRE_CONFIGURED`: si es `true`, Apolo falla si no hay navegador definido por el usuario.
+- `APOLO_BROWSER_REQUIRE_CONFIGURED`: si es `true`, apolov2 falla si no hay navegador definido por el usuario.
 - `APOLO_CONFIG_FILE`: ruta alternativa al JSON principal de Apolo.
 
 Ejemplo de overrides:
@@ -113,7 +113,7 @@ Para usar tu perfil real de Brave, usa el directorio raíz `User Data` y separa 
 }
 ```
 
-Si Brave ya está abierto con ese mismo perfil, Chromium puede bloquear el arranque del perfil persistente. Cierra Brave antes de iniciar Apolo si ves errores de perfil en uso.
+Si Brave ya está abierto con ese mismo perfil, Chromium puede bloquear el arranque del perfil persistente. Cierra Brave antes de iniciar apolov2 si ves errores de perfil en uso.
 
 Si quieres controlar tu Brave real mientras permanece abierto, inicia Brave con CDP y configura el endpoint:
 
@@ -142,6 +142,42 @@ Desde la raíz canónica:
 cd C:\apolo
 python -m uvicorn mcp.server:app --host 127.0.0.1 --port 8000
 ```
+
+## Ejecutar la interfaz de escritorio
+
+Desde la raíz del proyecto y con el entorno virtual activado:
+
+```powershell
+python -m ui.app
+```
+
+La interfaz usa Qt Widgets, mantiene el backend separado mediante `ApoloManager` y
+se minimiza a la bandeja del sistema al cerrar la ventana. El comando `Salir` del
+menú de la bandeja detiene apolov2 correctamente.
+
+La voz local usa Kokoro-82M v1.0 mediante ONNX Runtime. En Windows, los modelos
+se guardan en `models/kokoro/` y la voz española se configura en `config/apolo.json`
+con `kokoro.voice`: `ef_dora`, `em_alex` o `em_santa`. La configuración incluida
+usa `em_alex` y el modelo de precisión completa.
+
+El listener admite dos modos: `voice.mode: "open"` mantiene la escucha activa y
+`voice.mode: "push_to_talk"` escucha solo mientras mantienes `voice.hotkey`
+(`ctrl+space` por defecto). También puedes usar `--mode push_to_talk --hotkey
+ctrl+space` al iniciar el listener.
+
+Para conversación interactiva, el backend configurado es `faster-whisper` con el
+modelo `medium` en CUDA y `float16`. El modelo se precarga al arrancar el listener:
+la primera vez puede descargarlo desde Hugging Face, pero después evita la espera
+de carga al terminar cada frase. El VAD usa bloques cortos y pre-roll para no perder
+el inicio de comandos breves; en `push_to_talk`, la grabación empieza en cuanto
+presionas la tecla.
+
+El acceso directo de Windows usa el icono propio `assets/apolo.ico` y ejecuta la
+interfaz con el Python del entorno virtual, sin abrir una consola.
+
+apolov2 usa un bloqueo único de instancia en `ui.app`: si se abre el icono mientras
+ya existe una interfaz activa, el segundo lanzamiento termina sin crear otra
+ventana, otro backend ni otro monitor de micrófono.
 
 Llamada básica:
 
@@ -177,22 +213,23 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/call -ContentType "app
 La arquitectura local de voz es:
 
 ```text
-microfono -> VAD -> whisper.cpp -> transcripcion -> Voice Gateway -> MCP/Codex
+microfono -> VAD/PTT -> faster-whisper -> transcripcion -> Voice Gateway -> MCP/Codex
 ```
 
-Apolo usa una union perezosa con el navegador: no abre ni inspecciona Brave solo para
+apolov2 usa una union perezosa con el navegador: no abre ni inspecciona Brave solo para
 entender una frase. Primero traduce la instruccion. Solo ejecuta acciones cuando el
 router devuelve una herramienta MCP concreta, por ejemplo `youtube_music.play` o
 `browser.open`.
 
-Configura `whisper.cpp` en `config/apolo.json`:
+Configura `faster-whisper` en `config/apolo.json`:
 
 ```json
 {
   "whisper": {
-    "executable": "C:\\ruta\\a\\whisper-cli.exe",
-    "model": "small",
-    "model_path": "C:\\ruta\\a\\models\\ggml-small.bin",
+    "backend": "faster-whisper",
+    "model": "medium",
+    "device": "cuda",
+    "compute_type": "float16",
     "language": "es"
   }
 }
