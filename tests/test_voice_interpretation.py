@@ -153,6 +153,62 @@ def test_registered_future_domain_becomes_a_structured_action():
     ]
 
 
+def test_registered_future_domain_can_be_planned_as_goal():
+    planner = ActionPlanner(IntentRegistry([IntentSpec("send_email", ("to", "body"), tool_handler="mail.send")]))
+    interpreted = InterpretedCommand(
+        "manda un correo a ana",
+        "manda un correo a ana",
+        "send_email",
+        {"to": "ana", "body": "hola"},
+        0.95,
+    )
+
+    goal = planner.plan_goal(interpreted)
+
+    assert goal is not None
+    assert goal.as_dict() == {
+        "intent": "send_email",
+        "objective": "manda un correo a ana",
+        "actions": [
+            {
+                "intent": "send_email",
+                "tool": "mail.send",
+                "args": {"to": "ana", "body": "hola"},
+                "reason": "registered intent",
+                "verify": "tool_result_ok",
+            }
+        ],
+        "observe": "tool_result",
+        "verify": "all_actions_ok",
+        "replan": "ask_or_escalate_on_failed_verification",
+    }
+
+
+def test_mcp_routes_expose_goal_with_action_plan():
+    result = route_command("pausa").as_dict()
+
+    assert result["goal"]["objective"] == "pausa"
+    assert result["goal"]["actions"] == [
+        {
+            "intent": "pause_music",
+            "tool": "youtube_music.pause",
+            "args": {},
+            "reason": "routed intent",
+            "verify": "tool_result_ok",
+        }
+    ]
+
+
+def test_short_asr_variants_use_fuzzy_intent_matching():
+    continua = route_command("contin a").as_dict()
+    siguiente = route_command("siguiente accion").as_dict()
+
+    assert continua["tool"] == "youtube_music.resume"
+    assert continua["interpretation"]["source"] == "asr_fuzzy"
+    assert siguiente["tool"] == "youtube_music.next"
+    assert siguiente["interpretation"]["source"] == "asr_fuzzy"
+
+
 def test_application_open_and_correction():
     chrome = route_command("abre Chrome").as_dict()
     firefox = route_command("abre... no, abre Firefox").as_dict()

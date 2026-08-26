@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import asdict, dataclass, field
+from difflib import SequenceMatcher
 from typing import Any, Dict, Iterable, Optional
 
 from core.config import get_float, get_int
@@ -344,6 +345,21 @@ class DeterministicIntentResolver:
             intent, confidence = controls[normalized_text]
             entities = {"variant": normalized_text} if normalized_text in {"esa no", "otra"} else {}
             return InterpretedCommand(raw_text, normalized_text, intent, entities, confidence, source="alias")
+        fuzzy = _short_command_alias_match(normalized_text, controls)
+        if fuzzy:
+            alias, intent, confidence = fuzzy
+            entities = {"variant": alias} if alias in {"esa no", "otra"} else {}
+            tree = _semantic_tree_from_command(intent, alias, entities)
+            return InterpretedCommand(
+                raw_text,
+                alias,
+                intent,
+                entities,
+                confidence,
+                source="asr_fuzzy",
+                semantic_tree=tree,
+                reason=f"matched short command alias from {normalized_text}",
+            )
         if normalized_text in {"sube", "baja"}:
             return InterpretedCommand(
                 raw_text,
@@ -369,17 +385,28 @@ class DeterministicIntentResolver:
                 return InterpretedCommand(raw_text, normalized_text, "browser_click", {"target": target}, 0.88)
         if normalized_text in COMMON_BROWSER_BUTTONS:
             return InterpretedCommand(raw_text, normalized_text, "browser_click", {"target": normalized_text}, 0.86)
+        volume_text = normalized_text
         volume = re.match(
             r"^(?:sube|baja|pon|fija|cambia)(?:\s+el)?\s+volumen(?:\s+a\s+([a-z0-9 ]+))?$",
-            normalized_text,
+            volume_text,
         )
+        if not volume:
+            volume_text = _best_phrase_match(
+                normalized_text,
+                ("sube volumen", "sube el volumen", "baja volumen", "baja el volumen"),
+                threshold=0.84,
+            ) or normalized_text
+            volume = re.match(
+                r"^(?:sube|baja|pon|fija|cambia)(?:\s+el)?\s+volumen(?:\s+a\s+([a-z0-9 ]+))?$",
+                volume_text,
+            )
         if volume:
             entities: Dict[str, Any] = {}
             if volume.group(1):
                 level = _parse_volume_level(volume.group(1))
                 if level is not None:
                     entities["level"] = min(100, max(0, level))
-            direction = normalized_text.split()[0]
+            direction = volume_text.split()[0]
             if direction in {"sube", "baja"} and not entities:
                 entities["direction"] = "up" if direction == "sube" else "down"
             return InterpretedCommand(raw_text, normalized_text, "set_volume", entities, 0.88)
@@ -747,6 +774,46 @@ def _parse_volume_level(text: str) -> Optional[int]:
         "cien": 100,
     }
     return number_words.get(value)
+
+
+def _short_command_alias_match(normalized_text: str, controls: Dict[str, tuple[str, float]]) -> Optional[tuple[str, str, float]]:
+    if len(normalized_text) > 28 or len(normalized_text.split()) > 4:
+        return None
+    best: tuple[str, str, float, float] | None = None
+    for alias, (intent, base_confidence) in controls.items():
+        if abs(len(alias) - len(normalized_text)) > 6:
+            continue
+        score = SequenceMatcher(None, normalized_text, alias).ratio()
+        if score < 0.84:
+            continue
+        if not _shares_command_shape(normalized_text, alias):
+            continue
+        if best is None or score > best[3]:
+            best = (alias, intent, min(base_confidence, 0.9), score)
+    return best[:3] if best else None
+
+
+def _shares_command_shape(text: str, alias: str) -> bool:
+    text_tokens = text.split()
+    alias_tokens = alias.split()
+    if not text_tokens or not alias_tokens:
+        return False
+    if text_tokens[0][0] == alias_tokens[0][0]:
+        return True
+    return bool(set(text_tokens) & set(alias_tokens))
+
+
+def _best_phrase_match(text: str, candidates: Iterable[str], threshold: float) -> Optional[str]:
+    if len(text) > 30 or len(text.split()) > 5:
+        return None
+    best_text = ""
+    best_score = 0.0
+    for candidate in candidates:
+        score = SequenceMatcher(None, text, candidate).ratio()
+        if score > best_score:
+            best_text = candidate
+            best_score = score
+    return best_text if best_score >= threshold else None
 
 
 def _drop_leading_article(text: str) -> str:

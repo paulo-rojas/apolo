@@ -306,6 +306,54 @@ def test_handle_tool_path_speaks_when_system_app_is_not_open(monkeypatch):
     assert spoken == ["No encontré abierta la aplicación discord."]
 
 
+def test_handle_tool_path_executes_goal_and_records_observation(monkeypatch):
+    import mcp.server as server
+
+    async def fake_execute_tool(tool, args):
+        return {"ok": True, "tool": tool, "args": args}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+    parsed = {
+        "kind": "mcp",
+        "tool": "youtube_music.pause",
+        "args": {},
+        "goal": {
+            "objective": "pausa",
+            "actions": [{"tool": "youtube_music.pause", "args": {}}],
+        },
+    }
+
+    result = asyncio.run(server.handle_tool_path("Apolo pausa", parsed))
+
+    assert result["result"] == {"ok": True, "tool": "youtube_music.pause", "args": {}}
+    assert result["execution"]["verified"] is True
+    assert result["execution"]["observations"][0]["ok"] is True
+
+
+def test_execute_goal_marks_replan_when_verification_fails(monkeypatch):
+    import mcp.server as server
+
+    async def fake_execute_tool(tool, args):
+        return {"ok": False, "error": "not playing"}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+
+    execution = asyncio.run(
+        server.execute_goal(
+            {
+                "goal": {
+                    "objective": "reanudar musica",
+                    "actions": [{"tool": "youtube_music.resume", "args": {}}],
+                }
+            }
+        )
+    )
+
+    assert execution["verified"] is False
+    assert execution["replan_required"] is True
+    assert execution["replan"] == "ask_or_escalate_on_failed_verification"
+
+
 def test_execute_tool_can_open_web(monkeypatch):
     import mcp.server as server
 

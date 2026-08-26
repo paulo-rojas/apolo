@@ -437,9 +437,13 @@ async def handle_codex_path(heard: str, parsed: Dict[str, Any]):
 
 async def handle_tool_path(heard: str, parsed: Dict[str, Any]):
     try:
-        result = await execute_tool(parsed["tool"], parsed.get("args", {}))
+        execution = await execute_goal(parsed) if parsed.get("goal") else None
+        result = execution["result"] if execution else await execute_tool(parsed["tool"], parsed.get("args", {}))
         _update_computer_audio_guard(parsed)
-        return {"ok": True, "heard": heard, "parsed": parsed, "result": result}
+        response = {"ok": True, "heard": heard, "parsed": parsed, "result": result}
+        if execution:
+            response["execution"] = execution
+        return response
     except Exception as error:
         response_text = tool_error_feedback(parsed, error)
         if not response_text:
@@ -454,6 +458,58 @@ async def handle_tool_path(heard: str, parsed: Dict[str, Any]):
             "feedback": "repeat",
             "response": response_text,
         }
+
+
+async def execute_goal(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    goal = parsed.get("goal") or {}
+    actions = goal.get("actions") or []
+    observations = []
+    last_result: Dict[str, Any] = {}
+    for index, action in enumerate(actions):
+        tool = str(action.get("tool") or "")
+        args = action.get("args") if isinstance(action.get("args"), dict) else {}
+        result = await execute_tool(tool, args)
+        observation = observe_action(index, action, result)
+        observations.append(observation)
+        last_result = result if isinstance(result, dict) else {"ok": True, "value": result}
+        if not verify_observation(observation):
+            return {
+                "ok": False,
+                "goal": goal.get("objective", ""),
+                "observations": observations,
+                "verified": False,
+                "replan_required": True,
+                "replan": goal.get("replan") or "ask_or_escalate_on_failed_verification",
+                "result": last_result,
+            }
+    return {
+        "ok": True,
+        "goal": goal.get("objective", ""),
+        "observations": observations,
+        "verified": True,
+        "replan_required": False,
+        "replan": "none",
+        "result": last_result,
+    }
+
+
+def observe_action(index: int, action: Dict[str, Any], result: Any) -> Dict[str, Any]:
+    return {
+        "index": index,
+        "tool": action.get("tool", ""),
+        "ok": tool_result_ok(result),
+        "result": result,
+    }
+
+
+def verify_observation(observation: Dict[str, Any]) -> bool:
+    return bool(observation.get("ok"))
+
+
+def tool_result_ok(result: Any) -> bool:
+    if isinstance(result, dict) and result.get("ok") is False:
+        return False
+    return True
 
 
 async def handle_memory_path(heard: str, parsed: Dict[str, Any]):

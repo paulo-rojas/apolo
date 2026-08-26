@@ -5,7 +5,7 @@ apolov2 ahora separa la interpretacion de lenguaje natural de la ejecucion de he
 Flujo actual:
 
 ```text
-transcript -> wake/session -> InputNormalizer -> IntentResolver -> SemanticTree -> ActionPlanner -> MCP/local/Codex
+transcript -> wake/session -> InputNormalizer -> IntentResolver -> SemanticTree -> Goal -> ActionPlan[] -> execute -> observe -> verify -> replan
 ```
 
 ## Componentes
@@ -18,14 +18,17 @@ transcript -> wake/session -> InputNormalizer -> IntentResolver -> SemanticTree 
 - `LocalModelIntentResolver`: interfaz para un modelo local ligero futuro.
 - `ReasoningProvider`: interfaz para Codex u otro modelo avanzado.
 - `ConversationContext`: memoria temporal con TTL, guardada aparte de la memoria persistente.
-- `voice.command_router.ActionPlanner`: traduce intenciones registradas a un `ActionPlan` tipado usando `IntentSpec.tool_handler`. Las rutas con reglas especiales conservan adaptadores compatibles.
+- `voice.command_router.ActionPlanner`: traduce intenciones registradas a un `Goal` con uno o mas `ActionPlan` tipados usando `IntentSpec.tool_handler`. Las rutas con reglas especiales conservan adaptadores compatibles.
+- `mcp.server.execute_goal`: ejecuta acciones, registra observaciones, verifica resultados y marca si hace falta replanificar.
 - `voice.providers`: contratos ligeros para STT, VAD, intents, memoria, reasoning y musica.
 
 ## Memoria
 
 El NLU no persiste frases fallidas. Solo marca `memory_action: store` cuando la instruccion expresa memoria semanticamente, por ejemplo `recuerda que ...`.
 
-Aliases generales como `pon`, `ponme` o `quiero escuchar` viven en reglas locales, no en memoria persistente. Un alias personalizado deberia persistirse solo si el usuario lo ensena explicitamente.
+Aliases generales como `pon`, `ponme` o `quiero escuchar` viven en reglas locales, no en memoria persistente. Variantes cortas producidas por ASR, como palabras partidas o una palabra cercana a un comando, se resuelven con matching difuso acotado dentro del NLU. Un alias personalizado deberia persistirse solo si el usuario lo ensena explicitamente.
+
+`core.memory_files.DEFAULT_VOICE_CORRECTIONS` no debe crecer como lista de sustituciones para cada error del microfono. Esa capa queda para correcciones persistentes, explicitas o de vocabulario muy estable; los errores sistematicos de comandos cortos pertenecen al normalizador, al resolver o a modelos de ASR/VAD.
 
 ## Confianza
 
@@ -43,7 +46,7 @@ Los puntajes son heuristicos, no probabilidades reales. Los umbrales viven en `c
 
 ## Compatibilidad
 
-`voice.command_router` funciona como adaptador: conserva rutas existentes hacia `youtube_music.*`, `web.*`, `system.*`, `local`, `memory` y `codex`, pero cada respuesta incluye `interpretation` para observabilidad y migracion gradual.
+`voice.command_router` funciona como adaptador: conserva rutas existentes hacia `youtube_music.*`, `web.*`, `system.*`, `local`, `memory` y `codex`, pero cada respuesta incluye `interpretation` para observabilidad y migracion gradual. Las rutas MCP tambien incluyen `goal`, de forma aditiva, para que la UI y el servidor puedan mostrar y ejecutar el plan sin romper clientes viejos que solo leen `tool` y `args`.
 
 La frontera de ejecucion esta protegida por `core.tool_contract.validate_structured_tool_args`: ninguna herramienta debe recibir `raw_text`, `normalized_text`, `transcript`, `command` ni strings que parezcan una frase de voz cruda. La regla de arquitectura es: natural language in, structured semantics out.
 

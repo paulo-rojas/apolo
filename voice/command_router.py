@@ -20,6 +20,7 @@ class RouteResult:
     args: Optional[Dict[str, Any]] = None
     reason: str = ""
     interpretation: Optional[InterpretedCommand] = None
+    goal: Optional["Goal"] = None
 
     def as_dict(self) -> Dict[str, Any]:
         data = {
@@ -31,6 +32,8 @@ class RouteResult:
         }
         if self.interpretation:
             data["interpretation"] = self.interpretation.as_dict()
+        if self.goal:
+            data["goal"] = self.goal.as_dict()
         return data
 
 
@@ -40,6 +43,36 @@ class ActionPlan:
     tool: str
     args: Dict[str, Any]
     reason: str = "registered intent"
+    verify: str = "tool_result_ok"
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "intent": self.intent,
+            "tool": self.tool,
+            "args": dict(self.args),
+            "reason": self.reason,
+            "verify": self.verify,
+        }
+
+
+@dataclass(frozen=True)
+class Goal:
+    intent: str
+    objective: str
+    actions: tuple[ActionPlan, ...]
+    observe: str = "tool_result"
+    verify: str = "all_actions_ok"
+    replan: str = "ask_or_escalate_on_failed_verification"
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "intent": self.intent,
+            "objective": self.objective,
+            "actions": [action.as_dict() for action in self.actions],
+            "observe": self.observe,
+            "verify": self.verify,
+            "replan": self.replan,
+        }
 
 
 class ActionPlanner:
@@ -47,12 +80,17 @@ class ActionPlanner:
         self.registry = registry or IntentRegistry()
 
     def plan(self, interpreted: InterpretedCommand) -> Optional[ActionPlan]:
+        goal = self.plan_goal(interpreted)
+        return goal.actions[0] if goal and goal.actions else None
+
+    def plan_goal(self, interpreted: InterpretedCommand) -> Optional[Goal]:
         if interpreted.needs_reasoning or interpreted.intent == "unknown":
             return None
         tool = self.registry.tool_for(interpreted.intent)
         if not tool:
             return None
-        return ActionPlan(interpreted.intent, tool, dict(interpreted.entities), "registered intent")
+        action = ActionPlan(interpreted.intent, tool, dict(interpreted.entities), "registered intent")
+        return Goal(interpreted.intent, interpreted.normalized_text or interpreted.intent, (action,))
 
 
 _ACTION_PLANNER = ActionPlanner()
@@ -204,6 +242,7 @@ def _route(
     args: Optional[Dict[str, Any]] = None,
     reason: str = "",
 ) -> RouteResult:
+    goal = _goal_from_route(kind, interpreted, tool, args or {}, reason)
     return RouteResult(
         kind=kind,
         command=command if command is not None else interpreted.normalized_text,
@@ -211,6 +250,29 @@ def _route(
         args=args or {},
         reason=reason or interpreted.reason,
         interpretation=interpreted,
+        goal=goal,
+    )
+
+
+def _goal_from_route(
+    kind: str,
+    interpreted: InterpretedCommand,
+    tool: str,
+    args: Dict[str, Any],
+    reason: str,
+) -> Optional[Goal]:
+    if kind != "mcp" or not tool:
+        return None
+    action = ActionPlan(
+        intent=interpreted.intent,
+        tool=tool,
+        args=dict(args),
+        reason=reason or interpreted.reason or "routed intent",
+    )
+    return Goal(
+        intent=interpreted.intent,
+        objective=interpreted.normalized_text or interpreted.intent,
+        actions=(action,),
     )
 
 
