@@ -12,7 +12,7 @@ class SystemVolumeUnavailable(RuntimeError):
     pass
 
 
-def set_system_volume(level: int | None = None, direction: str | None = None, step: int = 2) -> Dict[str, Any]:
+def set_system_volume(level: int | None = None, direction: str | None = None, step: int = 5) -> Dict[str, Any]:
     if level is not None:
         return _set_exact_volume(level)
     if direction in {"up", "down"}:
@@ -33,7 +33,7 @@ def _set_exact_volume(level: int) -> Dict[str, Any]:
     raise SystemVolumeUnavailable("exact volume requires nircmd.exe or a future Windows audio backend")
 
 
-def _nudge_volume(direction: str, step: int = 2) -> Dict[str, Any]:
+def _nudge_volume(direction: str, step: int = 5) -> Dict[str, Any]:
     if os.name != "nt":
         raise SystemVolumeUnavailable("volume hotkeys are only implemented on Windows")
     virtual_key = "0xAF" if direction == "up" else "0xAE"

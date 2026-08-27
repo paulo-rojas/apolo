@@ -267,7 +267,7 @@ async def execute_tool(tool: str, args: Dict[str, Any]):
                 set_system_volume,
                 args.get("level"),
                 args.get("direction"),
-                args.get("step", 2),
+                args.get("step") or get_int("system.volume_step", 5, minimum=1),
             ),
             timeout=get_int("actions.timeout_seconds", 5, minimum=1),
         )

@@ -36,6 +36,9 @@
   "actions": {
     "timeout_seconds": 5
   },
+  "system": {
+    "volume_step": 5
+  },
   "voice": {
     "mode": "open",
     "hotkey": "ctrl+space",

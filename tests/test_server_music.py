@@ -194,12 +194,28 @@ def test_execute_tool_can_set_system_volume(monkeypatch):
 
     monkeypatch.setattr(
         "core.system_volume.set_system_volume",
-        lambda level=None, direction=None, step=2: {"ok": True, "level": level, "direction": direction, "step": step},
+        lambda level=None, direction=None, step=5: {"ok": True, "level": level, "direction": direction, "step": step},
     )
 
     result = asyncio.run(server.execute_tool("system.set_volume", {"level": 50}))
 
-    assert result == {"ok": True, "level": 50, "direction": None, "step": 2}
+    assert result == {"ok": True, "level": 50, "direction": None, "step": 5}
+
+
+def test_execute_tool_uses_configured_volume_step(monkeypatch, tmp_path):
+    import mcp.server as server
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"system":{"volume_step":7}}', encoding="utf-8")
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(config_path))
+    monkeypatch.setattr(
+        "core.system_volume.set_system_volume",
+        lambda level=None, direction=None, step=5: {"ok": True, "level": level, "direction": direction, "step": step},
+    )
+
+    result = asyncio.run(server.execute_tool("system.set_volume", {"direction": "down"}))
+
+    assert result == {"ok": True, "level": None, "direction": "down", "step": 7}
 
 
 def test_execute_tool_rejects_raw_voice_command_args():

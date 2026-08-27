@@ -38,3 +38,14 @@ def test_nudge_volume_uses_windows_media_keys(monkeypatch):
     assert "keybd_event(0xAF" in calls[0][-1]
     assert "SendKeys" not in calls[0][-1]
     assert "VolumeUp" not in calls[0][-1]
+
+
+def test_nudge_volume_default_step_is_more_noticeable(monkeypatch):
+    import core.system_volume as volume
+
+    monkeypatch.setattr(volume.os, "name", "nt")
+    monkeypatch.setattr(volume.subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0))
+
+    result = volume.set_system_volume(direction="down")
+
+    assert result == {"ok": True, "direction": "down", "step": 5, "method": "media_keys"}
