@@ -629,7 +629,7 @@ class DeterministicIntentResolver:
                 semantic_tree=tree,
             )
         play_match = re.match(
-            r"^(?:pon|ponme|reproduce|reproducir|toca|quiero escuchar)\s+(.+)$",
+            r"^(?:pon|ponme|ponle(?:\s+mi\s+cancion)?|reproduce|reproducir|toca|quiero escuchar)\s+(.+)$",
             normalized_text,
         )
         if not play_match:

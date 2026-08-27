@@ -313,7 +313,7 @@ async def execute_tool(tool: str, args: Dict[str, Any]):
         method = tool.split(".", 1)[1]
         return await asyncio.wait_for(
             run_agent_call(music.call, method, args),
-            timeout=get_int("music.action_timeout_seconds", 20, minimum=1),
+            timeout=get_int("music.action_timeout_seconds", 45, minimum=1),
         )
 
     raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
@@ -728,6 +728,8 @@ def repeat_response_text(parsed: Dict[str, Any]) -> str:
 
 
 def tool_error_feedback(parsed: Dict[str, Any], error: Exception) -> str:
+    if isinstance(error, asyncio.TimeoutError) and str(parsed.get("tool") or "").startswith("youtube_music."):
+        return "YouTube Music tardó demasiado en responder. Reinténtalo en unos segundos."
     if error.__class__.__name__ == "SystemVolumeUnavailable":
         return volume_unavailable_feedback(parsed, str(error))
     if error.__class__.__name__ != "SystemAppNotFound":

@@ -242,6 +242,31 @@ def test_music_tool_uses_music_action_timeout(monkeypatch, tmp_path):
         asyncio.run(server.execute_tool("youtube_music.pause", {}))
 
 
+def test_handle_tool_path_speaks_when_youtube_music_times_out(monkeypatch):
+    import mcp.server as server
+
+    spoken = []
+
+    async def fake_execute_tool(tool, args):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(server, "schedule_speech", spoken.append)
+
+    parsed = {
+        "kind": "mcp",
+        "tool": "youtube_music.play",
+        "args": {"query": "the strokes"},
+    }
+    result = asyncio.run(server.handle_tool_path("Apolo pon The Strokes", parsed))
+
+    assert result["ok"] is True
+    assert result["kind"] == "feedback"
+    assert result["response"] == "YouTube Music tardó demasiado en responder. Reinténtalo en unos segundos."
+    assert "trace" not in result
+    assert spoken == ["YouTube Music tardó demasiado en responder. Reinténtalo en unos segundos."]
+
+
 def test_agent_worker_ignores_late_result_after_timeout():
     import mcp.server as server
 

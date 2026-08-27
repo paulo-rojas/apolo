@@ -64,6 +64,7 @@ def test_apolo_pon_everlong_routes_music(tmp_path):
     assert result["kind"] == "mcp"
     assert result["tool"] == "youtube_music.play"
     assert result["args"] == {"query": "everlong"}
+    assert result["goal"]["actions"][0]["tool"] == "youtube_music.play"
 
 
 def test_apolo_pon_everlong_de_foo_fighters_routes_music(tmp_path):

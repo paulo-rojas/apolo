@@ -26,6 +26,14 @@ def test_music_variants_converge_to_play_music():
         assert result["interpretation"]["needs_reasoning"] is False
 
 
+def test_ponle_mi_cancion_routes_to_music():
+    result = route_command("ponle mi cancion The Strokes").as_dict()
+
+    assert result["kind"] == "mcp"
+    assert result["tool"] == "youtube_music.play"
+    assert result["args"] == {"query": "the strokes"}
+
+
 def test_music_artist_is_extracted_but_tool_remains_compatible():
     result = route_command("reproduce Numb de Linkin Park").as_dict()
 

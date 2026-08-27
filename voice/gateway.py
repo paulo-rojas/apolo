@@ -66,6 +66,7 @@ class VoiceGateway:
             command=routed.command,
             tool=routed.tool,
             args=routed.args or {},
+            goal=routed.goal.as_dict() if routed.goal else None,
             reason=routed.reason,
             interpretation=routed.interpretation.as_dict() if routed.interpretation else None,
             feedback=_feedback_for_route(routed.kind),
