@@ -352,6 +352,152 @@ def test_execute_goal_marks_replan_when_verification_fails(monkeypatch):
     assert execution["verified"] is False
     assert execution["replan_required"] is True
     assert execution["replan"] == "ask_or_escalate_on_failed_verification"
+    assert execution["failure"]["type"] == "recoverable"
+
+
+def test_execute_goal_runs_multistep_actions_in_order(monkeypatch):
+    import mcp.server as server
+
+    calls = []
+
+    async def fake_execute_tool(tool, args):
+        calls.append((tool, args))
+        if tool == "web.open":
+            return {"ok": True, "url": args["target"]}
+        return {"ok": True, "tool": tool}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+
+    execution = asyncio.run(
+        server.execute_goal(
+            {
+                "goal": {
+                    "objective": "reproducir numb en youtube music",
+                    "max_actions": 5,
+                    "actions": [
+                        {"tool": "browser.ensure_cdp", "args": {}, "verify": "tool_result_ok"},
+                        {
+                            "tool": "web.open",
+                            "args": {"target": "https://music.youtube.com"},
+                            "verify": "web_opened",
+                        },
+                        {"tool": "youtube_music.play", "args": {"query": "numb"}, "verify": "music_action_ok"},
+                    ],
+                }
+            }
+        )
+    )
+
+    assert calls == [
+        ("browser.ensure_cdp", {}),
+        ("web.open", {"target": "https://music.youtube.com"}),
+        ("youtube_music.play", {"query": "numb"}),
+    ]
+    assert execution["verified"] is True
+    assert len(execution["observations"]) == 3
+
+
+def test_execute_goal_stops_when_intermediate_action_fails(monkeypatch):
+    import mcp.server as server
+
+    calls = []
+
+    async def fake_execute_tool(tool, args):
+        calls.append((tool, args))
+        if tool == "web.open":
+            return {"ok": True}
+        return {"ok": True}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+
+    execution = asyncio.run(
+        server.execute_goal(
+            {
+                "goal": {
+                    "objective": "abrir youtube music y reproducir numb",
+                    "actions": [
+                        {"tool": "browser.ensure_cdp", "args": {}},
+                        {"tool": "web.open", "args": {"target": "https://music.youtube.com"}, "verify": "web_opened"},
+                        {"tool": "youtube_music.play", "args": {"query": "numb"}},
+                    ],
+                }
+            }
+        )
+    )
+
+    assert calls == [
+        ("browser.ensure_cdp", {}),
+        ("web.open", {"target": "https://music.youtube.com"}),
+    ]
+    assert execution["verified"] is False
+    assert execution["replan_required"] is True
+    assert execution["failure"] == {"type": "recoverable", "action": 1}
+
+
+def test_execute_goal_can_resolve_args_from_previous_observation(monkeypatch):
+    import mcp.server as server
+
+    calls = []
+
+    async def fake_execute_tool(tool, args):
+        calls.append((tool, args))
+        if tool == "web.open":
+            return {"ok": True, "url": "https://music.youtube.com"}
+        return {"ok": True, "target": args["target"]}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+
+    execution = asyncio.run(
+        server.execute_goal(
+            {
+                "goal": {
+                    "objective": "abrir y verificar pagina",
+                    "actions": [
+                        {"tool": "web.open", "args": {"target": "https://music.youtube.com"}, "verify": "web_opened"},
+                        {
+                            "tool": "browser.find",
+                            "args": {"target": {"from_observation": {"index": 0, "path": "result.url"}}},
+                        },
+                    ],
+                }
+            }
+        )
+    )
+
+    assert calls == [
+        ("web.open", {"target": "https://music.youtube.com"}),
+        ("browser.find", {"target": "https://music.youtube.com"}),
+    ]
+    assert execution["verified"] is True
+
+
+def test_execute_goal_refuses_plans_over_max_actions(monkeypatch):
+    import mcp.server as server
+
+    async def fake_execute_tool(tool, args):
+        raise AssertionError("oversized plans must not execute")
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+
+    execution = asyncio.run(
+        server.execute_goal(
+            {
+                "goal": {
+                    "objective": "plan demasiado largo",
+                    "max_actions": 1,
+                    "actions": [
+                        {"tool": "browser.ensure_cdp", "args": {}},
+                        {"tool": "youtube_music.play", "args": {"query": "numb"}},
+                    ],
+                }
+            }
+        )
+    )
+
+    assert execution["verified"] is False
+    assert execution["replan_required"] is False
+    assert execution["failure"] == {"type": "definitive", "action": None}
+    assert execution["result"] == {"ok": False, "error": "goal exceeds max_actions"}
 
 
 def test_execute_tool_can_open_web(monkeypatch):

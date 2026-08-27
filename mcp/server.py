@@ -463,25 +463,30 @@ async def handle_tool_path(heard: str, parsed: Dict[str, Any]):
 async def execute_goal(parsed: Dict[str, Any]) -> Dict[str, Any]:
     goal = parsed.get("goal") or {}
     actions = goal.get("actions") or []
+    max_actions = _goal_limit(goal, "max_actions", default=5, minimum=1)
+    max_replans = _goal_limit(goal, "max_replans", default=1, minimum=0)
     observations = []
     last_result: Dict[str, Any] = {}
+    if len(actions) > max_actions:
+        return _goal_failed(
+            goal,
+            observations,
+            {"ok": False, "error": "goal exceeds max_actions"},
+            "definitive",
+            max_replans,
+        )
     for index, action in enumerate(actions):
         tool = str(action.get("tool") or "")
-        args = action.get("args") if isinstance(action.get("args"), dict) else {}
-        result = await execute_tool(tool, args)
-        observation = observe_action(index, action, result)
+        args = resolve_action_args(action, observations)
+        try:
+            result = await execute_tool(tool, args)
+        except Exception as error:
+            result = {"ok": False, "error": str(error), "error_type": error.__class__.__name__}
+        observation = observe_action(index, action, result, goal.get("observe", "tool_result"))
         observations.append(observation)
         last_result = result if isinstance(result, dict) else {"ok": True, "value": result}
-        if not verify_observation(observation):
-            return {
-                "ok": False,
-                "goal": goal.get("objective", ""),
-                "observations": observations,
-                "verified": False,
-                "replan_required": True,
-                "replan": goal.get("replan") or "ask_or_escalate_on_failed_verification",
-                "result": last_result,
-            }
+        if not verify_observation(observation, action, goal):
+            return _goal_failed(goal, observations, last_result, failure_type(last_result), max_replans)
     return {
         "ok": True,
         "goal": goal.get("objective", ""),
@@ -489,27 +494,129 @@ async def execute_goal(parsed: Dict[str, Any]) -> Dict[str, Any]:
         "verified": True,
         "replan_required": False,
         "replan": "none",
+        "replan_attempts": 0,
+        "max_replans": max_replans,
+        "status": "finished",
         "result": last_result,
     }
 
 
-def observe_action(index: int, action: Dict[str, Any], result: Any) -> Dict[str, Any]:
-    return {
+def resolve_action_args(action: Dict[str, Any], observations: list[Dict[str, Any]]) -> Dict[str, Any]:
+    args = action.get("args") if isinstance(action.get("args"), dict) else {}
+    return {key: resolve_action_value(value, observations) for key, value in args.items()}
+
+
+def resolve_action_value(value: Any, observations: list[Dict[str, Any]]) -> Any:
+    if not isinstance(value, dict) or set(value) != {"from_observation"}:
+        return value
+    selector = value.get("from_observation")
+    if not isinstance(selector, dict):
+        return ""
+    index = int(selector.get("index", -1))
+    path = str(selector.get("path", "result")).split(".")
+    if index < 0 or index >= len(observations):
+        return ""
+    current: Any = observations[index]
+    for part in path:
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(part)
+    return current
+
+
+def observe_action(index: int, action: Dict[str, Any], result: Any, goal_observer: str = "tool_result") -> Dict[str, Any]:
+    observer = str(action.get("observe") or goal_observer or "tool_result")
+    observe = OBSERVERS.get(observer, observe_tool_result)
+    observation = {
         "index": index,
         "tool": action.get("tool", ""),
-        "ok": tool_result_ok(result),
+        "observer": observer,
         "result": result,
     }
+    observation.update(observe(result, action))
+    return observation
 
 
-def verify_observation(observation: Dict[str, Any]) -> bool:
+def verify_observation(observation: Dict[str, Any], action: Dict[str, Any] | None = None, goal: Dict[str, Any] | None = None) -> bool:
+    verifier_name = str((action or {}).get("verify") or (goal or {}).get("verify") or "tool_result_ok")
+    verifier = VERIFIERS.get(verifier_name, verify_tool_result)
+    return verifier(observation)
+
+
+def observe_tool_result(result: Any, action: Dict[str, Any]) -> Dict[str, Any]:
+    return {"ok": tool_result_ok(result)}
+
+
+def verify_tool_result(observation: Dict[str, Any]) -> bool:
     return bool(observation.get("ok"))
+
+
+def verify_web_opened(observation: Dict[str, Any]) -> bool:
+    result = observation.get("result")
+    return isinstance(result, dict) and result.get("ok") is not False and bool(result.get("url"))
+
+
+def verify_music_action(observation: Dict[str, Any]) -> bool:
+    result = observation.get("result")
+    if isinstance(result, dict) and result.get("playing") is False:
+        return False
+    return tool_result_ok(result)
 
 
 def tool_result_ok(result: Any) -> bool:
     if isinstance(result, dict) and result.get("ok") is False:
         return False
     return True
+
+
+def failure_type(result: Dict[str, Any]) -> str:
+    error = str(result.get("error") or "").lower()
+    if "empty" in error or "required" in error or "missing" in error:
+        return "insufficient_info"
+    if result.get("error_type") in {"HTTPException", "ToolContractError"}:
+        return "definitive"
+    return "recoverable"
+
+
+def _goal_failed(
+    goal: Dict[str, Any],
+    observations: list[Dict[str, Any]],
+    result: Dict[str, Any],
+    kind: str,
+    max_replans: int,
+) -> Dict[str, Any]:
+    can_replan = kind in {"recoverable", "insufficient_info"} and max_replans > 0
+    return {
+        "ok": False,
+        "goal": goal.get("objective", ""),
+        "observations": observations,
+        "verified": False,
+        "replan_required": can_replan,
+        "failure": {"type": kind, "action": len(observations) - 1 if observations else None},
+        "replan": goal.get("replan") or "ask_or_escalate_on_failed_verification",
+        "replan_attempts": 0,
+        "max_replans": max_replans,
+        "status": "replan_required" if can_replan else "failed",
+        "result": result,
+    }
+
+
+def _goal_limit(goal: Dict[str, Any], key: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(goal.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+OBSERVERS = {
+    "tool_result": observe_tool_result,
+}
+
+VERIFIERS = {
+    "tool_result_ok": verify_tool_result,
+    "web_opened": verify_web_opened,
+    "music_action_ok": verify_music_action,
+}
 
 
 async def handle_memory_path(heard: str, parsed: Dict[str, Any]):

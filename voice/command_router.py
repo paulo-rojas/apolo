@@ -44,6 +44,7 @@ class ActionPlan:
     args: Dict[str, Any]
     reason: str = "registered intent"
     verify: str = "tool_result_ok"
+    observe: str = "tool_result"
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -52,6 +53,7 @@ class ActionPlan:
             "args": dict(self.args),
             "reason": self.reason,
             "verify": self.verify,
+            "observe": self.observe,
         }
 
 
@@ -63,6 +65,8 @@ class Goal:
     observe: str = "tool_result"
     verify: str = "all_actions_ok"
     replan: str = "ask_or_escalate_on_failed_verification"
+    max_actions: int = 5
+    max_replans: int = 1
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +76,8 @@ class Goal:
             "observe": self.observe,
             "verify": self.verify,
             "replan": self.replan,
+            "max_actions": self.max_actions,
+            "max_replans": self.max_replans,
         }
 
 
@@ -86,11 +92,44 @@ class ActionPlanner:
     def plan_goal(self, interpreted: InterpretedCommand) -> Optional[Goal]:
         if interpreted.needs_reasoning or interpreted.intent == "unknown":
             return None
+        if interpreted.intent == "open_and_play_music":
+            return self._plan_open_and_play_music(interpreted)
         tool = self.registry.tool_for(interpreted.intent)
         if not tool:
             return None
         action = ActionPlan(interpreted.intent, tool, dict(interpreted.entities), "registered intent")
         return Goal(interpreted.intent, interpreted.normalized_text or interpreted.intent, (action,))
+
+    def _plan_open_and_play_music(self, interpreted: InterpretedCommand) -> Goal:
+        music_entities = interpreted.entities.get("music")
+        music_args = _music_tool_args(music_entities if isinstance(music_entities, dict) else {})
+        objective = _music_objective(music_args, fallback=interpreted.normalized_text)
+        return Goal(
+            intent=interpreted.intent,
+            objective=objective,
+            actions=(
+                ActionPlan(
+                    intent=interpreted.intent,
+                    tool="browser.ensure_cdp",
+                    args={},
+                    reason="prepare browser session",
+                ),
+                ActionPlan(
+                    intent=interpreted.intent,
+                    tool="web.open",
+                    args={"target": "https://music.youtube.com"},
+                    reason="open youtube music",
+                    verify="web_opened",
+                ),
+                ActionPlan(
+                    intent="play_music",
+                    tool="youtube_music.play",
+                    args=music_args,
+                    reason="play requested media",
+                    verify="music_action_ok",
+                ),
+            ),
+        )
 
 
 _ACTION_PLANNER = ActionPlanner()
@@ -222,9 +261,17 @@ def _route_interpreted(interpreted: InterpretedCommand) -> RouteResult:
             args=_music_tool_args(interpreted.entities),
         )
 
-    action = _ACTION_PLANNER.plan(interpreted)
-    if action:
-        return _route("mcp", interpreted, tool=action.tool, args=action.args, reason=action.reason)
+    goal = _ACTION_PLANNER.plan_goal(interpreted)
+    if goal and goal.actions:
+        action = goal.actions[-1]
+        return _route(
+            "mcp",
+            interpreted,
+            tool=action.tool,
+            args=action.args,
+            reason=action.reason,
+            goal=goal,
+        )
 
     if interpreted.needs_reasoning:
         reason = interpreted.reason or "local parser did not understand command"
@@ -241,8 +288,9 @@ def _route(
     tool: str = "",
     args: Optional[Dict[str, Any]] = None,
     reason: str = "",
+    goal: Optional[Goal] = None,
 ) -> RouteResult:
-    goal = _goal_from_route(kind, interpreted, tool, args or {}, reason)
+    goal = goal or _goal_from_route(kind, interpreted, tool, args or {}, reason)
     return RouteResult(
         kind=kind,
         command=command if command is not None else interpreted.normalized_text,
@@ -286,6 +334,13 @@ def _music_tool_args(entities: Dict[str, Any]) -> Dict[str, Any]:
     if platform:
         args["platform"] = platform
     return args
+
+
+def _music_objective(args: Dict[str, Any], fallback: str) -> str:
+    query = str(args.get("query") or "").strip()
+    artist = str(args.get("artist") or "").strip()
+    title = " ".join(part for part in (query, artist) if part).strip()
+    return f"reproducir {title} en YouTube Music" if title else fallback
 
 
 def _codex_command(interpreted: InterpretedCommand) -> str:

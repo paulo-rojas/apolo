@@ -176,11 +176,14 @@ def test_registered_future_domain_can_be_planned_as_goal():
                 "args": {"to": "ana", "body": "hola"},
                 "reason": "registered intent",
                 "verify": "tool_result_ok",
+                "observe": "tool_result",
             }
         ],
         "observe": "tool_result",
         "verify": "all_actions_ok",
         "replan": "ask_or_escalate_on_failed_verification",
+        "max_actions": 5,
+        "max_replans": 1,
     }
 
 
@@ -195,6 +198,7 @@ def test_mcp_routes_expose_goal_with_action_plan():
             "args": {},
             "reason": "routed intent",
             "verify": "tool_result_ok",
+            "observe": "tool_result",
         }
     ]
 
@@ -229,6 +233,55 @@ def test_short_alias_matching_comes_from_intent_registry():
     assert fuzzy.intent == "mute_music"
     assert fuzzy.normalized_text == "silencio"
     assert fuzzy.source == "asr_fuzzy"
+
+
+def test_fuzzy_matching_rejects_long_or_ambiguous_phrases():
+    long_phrase = route_command("continua revisando la implementacion antes de tocar youtube").as_dict()
+    negated = route_command("no pausa").as_dict()
+    ambiguous = route_command("otra anterior").as_dict()
+
+    assert long_phrase["tool"] == ""
+    assert long_phrase["kind"] in {"codex", "ignore"}
+    assert negated["tool"] == ""
+    assert negated["kind"] in {"codex", "ignore"}
+    assert ambiguous["tool"] == ""
+    assert ambiguous["kind"] in {"codex", "ignore"}
+
+
+def test_open_youtube_music_and_play_builds_multistep_goal():
+    result = route_command("abre YouTube Music y pon Numb de Linkin Park").as_dict()
+
+    assert result["kind"] == "mcp"
+    assert result["tool"] == "youtube_music.play"
+    assert result["args"] == {"query": "numb", "artist": "linkin park"}
+    assert result["interpretation"]["intent"] == "open_and_play_music"
+    assert result["goal"]["objective"] == "reproducir numb linkin park en YouTube Music"
+    assert result["goal"]["actions"] == [
+        {
+            "intent": "open_and_play_music",
+            "tool": "browser.ensure_cdp",
+            "args": {},
+            "reason": "prepare browser session",
+            "verify": "tool_result_ok",
+            "observe": "tool_result",
+        },
+        {
+            "intent": "open_and_play_music",
+            "tool": "web.open",
+            "args": {"target": "https://music.youtube.com"},
+            "reason": "open youtube music",
+            "verify": "web_opened",
+            "observe": "tool_result",
+        },
+        {
+            "intent": "play_music",
+            "tool": "youtube_music.play",
+            "args": {"query": "numb", "artist": "linkin park"},
+            "reason": "play requested media",
+            "verify": "music_action_ok",
+            "observe": "tool_result",
+        },
+    ]
 
 
 def test_application_open_and_correction():

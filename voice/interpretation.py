@@ -274,6 +274,10 @@ class DeterministicIntentResolver:
         if normalized_text in INCOMPLETE_COMMANDS:
             return InterpretedCommand(raw_text, normalized_text, "unknown", confidence=0.45, reason="missing command target")
 
+        compound = self._compound(raw_text, normalized_text)
+        if compound:
+            return compound
+
         simple = self._simple_control(raw_text, normalized_text)
         if simple:
             return simple
@@ -321,6 +325,30 @@ class DeterministicIntentResolver:
             )
 
         return _unknown(raw_text, normalized_text, 0.25, "not a command")
+
+    def _compound(self, raw_text: str, normalized_text: str) -> Optional[InterpretedCommand]:
+        match = re.match(
+            r"^(?:abre|abrir|entra|entrar)\s+(youtube(?:\s+music)?|ytmusic)\s+y\s+"
+            r"(?:pon|ponme|reproduce|reproducir|toca|quiero escuchar)\s+(.+)$",
+            normalized_text,
+        )
+        if not match:
+            return None
+        target = "youtube_music"
+        music_text = match.group(2).strip()
+        tree, music = _parse_music_frame(music_text)
+        root = SemanticNode("open_and_play_music", text=normalized_text)
+        root.children.append(SemanticNode("target", target))
+        root.children.append(tree)
+        return InterpretedCommand(
+            raw_text,
+            normalized_text,
+            "open_and_play_music",
+            {"target": target, "music": music},
+            0.93,
+            source="rule",
+            semantic_tree=root,
+        )
 
     def _simple_control(self, raw_text: str, normalized_text: str) -> Optional[InterpretedCommand]:
         controls = self.registry.simple_aliases()
@@ -762,24 +790,30 @@ def _parse_volume_level(text: str) -> Optional[int]:
 def _short_command_alias_match(normalized_text: str, controls: Dict[str, tuple[str, float]]) -> Optional[tuple[str, str, float]]:
     if len(normalized_text) > 28 or len(normalized_text.split()) > 4:
         return None
-    best: tuple[str, str, float, float] | None = None
+    candidates: list[tuple[str, str, float, float]] = []
     for alias, (intent, base_confidence) in controls.items():
         if abs(len(alias) - len(normalized_text)) > 6:
             continue
         score = SequenceMatcher(None, normalized_text, alias).ratio()
-        if score < 0.84:
+        if score < 0.86:
             continue
         if not _shares_command_shape(normalized_text, alias):
             continue
-        if best is None or score > best[3]:
-            best = (alias, intent, min(base_confidence, 0.9), score)
-    return best[:3] if best else None
+        candidates.append((alias, intent, min(base_confidence, 0.9), score))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[3], reverse=True)
+    if len(candidates) > 1 and candidates[0][3] - candidates[1][3] < 0.08:
+        return None
+    return candidates[0][:3]
 
 
 def _shares_command_shape(text: str, alias: str) -> bool:
     text_tokens = text.split()
     alias_tokens = alias.split()
     if not text_tokens or not alias_tokens:
+        return False
+    if text_tokens[0] in {"no", "nunca", "sin"}:
         return False
     if text_tokens[0][0] == alias_tokens[0][0]:
         return True
@@ -922,6 +956,11 @@ def _looks_like_codex_status_question(normalized: str) -> bool:
 
 DEFAULT_INTENTS = (
     IntentSpec("play_music", (), ("query", "artist", "album", "platform"), "youtube_music.play"),
+    IntentSpec(
+        "open_and_play_music",
+        ("target", "music"),
+        tool_handler="",
+    ),
     IntentSpec(
         "pause_music",
         tool_handler="youtube_music.pause",

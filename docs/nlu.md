@@ -13,13 +13,13 @@ transcript -> wake/session -> InputNormalizer -> IntentResolver -> SemanticTree 
 - `voice.interpretation.InterpretedCommand`: DTO interno con `raw_text`, `normalized_text`, `intent`, `entities`, `confidence`, `needs_reasoning`, `needs_memory` y `source`.
 - `SemanticNode`: arbol semantico ligero para cualquier dominio. Primero se representa la intencion y sus entidades; despues se crean los argumentos de una accion.
 - `InputNormalizer`: limpia muletillas, repeticiones simples y autocorrecciones como `abre... no, abre Firefox` de forma conservadora.
-- `IntentRegistry`: declara intents, entidades y handler asociado. Agregar intents nuevos no requiere cambiar el DTO.
+- `IntentRegistry`: declara intents, entidades, handler asociado y aliases de voz. Agregar aliases cortos no requiere cambiar el resolver.
 - `DeterministicIntentResolver`: nivel 1 de baja latencia para aliases, patrones y extraccion simple.
 - `LocalModelIntentResolver`: interfaz para un modelo local ligero futuro.
 - `ReasoningProvider`: interfaz para Codex u otro modelo avanzado.
 - `ConversationContext`: memoria temporal con TTL, guardada aparte de la memoria persistente.
 - `voice.command_router.ActionPlanner`: traduce intenciones registradas a un `Goal` con uno o mas `ActionPlan` tipados usando `IntentSpec.tool_handler`. Las rutas con reglas especiales conservan adaptadores compatibles.
-- `mcp.server.execute_goal`: ejecuta acciones, registra observaciones, verifica resultados y marca si hace falta replanificar.
+- `mcp.server.execute_goal`: ejecuta acciones, registra observaciones, verifica resultados y marca si hace falta replanificar. Respeta limites `max_actions` y `max_replans`.
 - `voice.providers`: contratos ligeros para STT, VAD, intents, memoria, reasoning y musica.
 
 ## Memoria
@@ -49,6 +49,36 @@ Los puntajes son heuristicos, no probabilidades reales. Los umbrales viven en `c
 `voice.command_router` funciona como adaptador: conserva rutas existentes hacia `youtube_music.*`, `web.*`, `system.*`, `local`, `memory` y `codex`, pero cada respuesta incluye `interpretation` para observabilidad y migracion gradual. Las rutas MCP tambien incluyen `goal`, de forma aditiva, para que la UI y el servidor puedan mostrar y ejecutar el plan sin romper clientes viejos que solo leen `tool` y `args`.
 
 La frontera de ejecucion esta protegida por `core.tool_contract.validate_structured_tool_args`: ninguna herramienta debe recibir `raw_text`, `normalized_text`, `transcript`, `command` ni strings que parezcan una frase de voz cruda. La regla de arquitectura es: natural language in, structured semantics out.
+
+## Planificacion y ejecucion
+
+`Goal` representa el objetivo del usuario; `ActionPlan[]` representa la estrategia concreta. Para mantener compatibilidad, `RouteResult` conserva `tool` y `args` como la accion principal o final, pero `goal.actions` es la fuente para la ejecucion secuencial cuando existe.
+
+Ejemplo multistep actual:
+
+```text
+abre YouTube Music y pon Numb de Linkin Park
+```
+
+produce un `Goal` cuyo objetivo es reproducir la cancion en YouTube Music y tres acciones tipadas:
+
+```text
+1. browser.ensure_cdp
+2. web.open(target="https://music.youtube.com")
+3. youtube_music.play(query="numb", artist="linkin park")
+```
+
+El executor corre las acciones en orden. Cada accion genera una observacion mediante `OBSERVERS` y se verifica mediante `VERIFIERS`, por ejemplo `tool_result_ok`, `web_opened` o `music_action_ok`. Si una verificacion falla, el plan se detiene y clasifica el fallo como `recoverable`, `insufficient_info` o `definitive`.
+
+El replanning sigue siendo acotado: por defecto `max_replans` es 1 y no hay loop infinito. En esta etapa `replan_required` y la clasificacion de fallo ya son comportamiento real; la generacion automatica de un plan alternativo todavia es scaffolding.
+
+Un `ActionPlan` puede resolver un argumento desde observaciones previas usando una referencia estructurada como:
+
+```json
+{"from_observation": {"index": 0, "path": "result.url"}}
+```
+
+Esto permite que el resultado de una accion afecte a las siguientes sin pasar texto libre por la frontera de herramientas.
 
 ## Cerebro general
 
