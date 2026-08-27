@@ -306,6 +306,63 @@ def test_handle_tool_path_speaks_when_system_app_is_not_open(monkeypatch):
     assert spoken == ["No encontré abierta la aplicación discord."]
 
 
+def test_handle_tool_path_speaks_when_exact_volume_backend_is_missing(monkeypatch):
+    import mcp.server as server
+    from core.system_volume import SystemVolumeUnavailable
+
+    spoken = []
+
+    async def fake_execute_tool(tool, args):
+        raise SystemVolumeUnavailable("exact volume requires nircmd.exe or a future Windows audio backend")
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(server, "schedule_speech", spoken.append)
+
+    parsed = {
+        "kind": "mcp",
+        "tool": "system.set_volume",
+        "args": {"level": 20},
+    }
+    result = asyncio.run(server.handle_tool_path("Apolo baja el volumen a 20", parsed))
+
+    assert result["ok"] is True
+    assert result["kind"] == "feedback"
+    assert result["result"]["ok"] is False
+    assert "trace" not in result
+    assert result["response"] == "No puedo fijar un volumen exacto todavía. Puedo subirlo o bajarlo por pasos."
+    assert spoken == ["No puedo fijar un volumen exacto todavía. Puedo subirlo o bajarlo por pasos."]
+
+
+def test_handle_tool_path_speaks_when_goal_volume_verification_fails(monkeypatch):
+    import mcp.server as server
+    from core.system_volume import SystemVolumeUnavailable
+
+    spoken = []
+
+    async def fake_execute_tool(tool, args):
+        raise SystemVolumeUnavailable("exact volume requires nircmd.exe or a future Windows audio backend")
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(server, "schedule_speech", spoken.append)
+
+    parsed = {
+        "kind": "mcp",
+        "tool": "system.set_volume",
+        "args": {"level": 20},
+        "goal": {
+            "objective": "bajar volumen a 20",
+            "actions": [{"tool": "system.set_volume", "args": {"level": 20}}],
+        },
+    }
+    result = asyncio.run(server.handle_tool_path("Apolo baja el volumen a 20", parsed))
+
+    assert result["ok"] is True
+    assert result["execution"]["verified"] is False
+    assert result["feedback"] == "unavailable"
+    assert result["response"] == "No puedo fijar un volumen exacto todavía. Puedo subirlo o bajarlo por pasos."
+    assert spoken == ["No puedo fijar un volumen exacto todavía. Puedo subirlo o bajarlo por pasos."]
+
+
 def test_handle_tool_path_executes_goal_and_records_observation(monkeypatch):
     import mcp.server as server
 
