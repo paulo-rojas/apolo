@@ -2,10 +2,13 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "apolo.json"
+DEFAULT_CORE_HOST = "127.0.0.1"
+DEFAULT_CORE_PORT = 8000
 
 
 def load_config() -> Dict[str, Any]:
@@ -80,3 +83,26 @@ def get_bool(path: str, default: bool, env: Optional[str] = None) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def core_host() -> str:
+    return get_str("core.host", DEFAULT_CORE_HOST, env="APOLO_CORE_HOST") or DEFAULT_CORE_HOST
+
+
+def core_port() -> int:
+    return get_int("core.port", DEFAULT_CORE_PORT, env="APOLO_CORE_PORT", minimum=1)
+
+
+def core_url() -> str:
+    configured = get_str("core.url", None, env="APOLO_CORE_URL")
+    if configured:
+        return configured.rstrip("/")
+    return f"http://{core_host()}:{core_port()}"
+
+
+def core_ws_url(path: str = "/ws/runtime") -> str:
+    parsed = urlparse(core_url())
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    base_path = parsed.path.rstrip("/")
+    endpoint = "/" + path.lstrip("/")
+    return parsed._replace(scheme=scheme, path=f"{base_path}{endpoint}", params="", query="", fragment="").geturl()

@@ -27,6 +27,10 @@ def log_json_path() -> Path:
     return log_dir() / "apolo.ndjson"
 
 
+def voice_interactions_path() -> Path:
+    return log_dir() / "voice_interactions.ndjson"
+
+
 def write_log(source: str, message: str, **fields: Any) -> None:
     timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
     clean_source = str(source or "SYSTEM").strip() or "SYSTEM"
@@ -38,6 +42,16 @@ def write_log(source: str, message: str, **fields: Any) -> None:
         with log_text_path().open("a", encoding="utf-8") as log_file:
             log_file.write(f"{timestamp} {clean_source:<12} {clean_message}\n")
         with log_json_path().open("a", encoding="utf-8") as json_file:
+            json_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def write_voice_interaction(**fields: Any) -> None:
+    timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+    entry = {"ts": timestamp, **fields}
+    directory = log_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        with voice_interactions_path().open("a", encoding="utf-8") as json_file:
             json_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 

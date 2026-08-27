@@ -6,13 +6,27 @@ import time
 import traceback
 from typing import Any, Dict
 
-from core.config import get_float, get_int
+from core.config import core_host, core_port, get_float, get_int
+from core.apolo_protocol import (
+    DeviceHeartbeatMessage,
+    DeviceRegisterMessage,
+    DeviceRegisteredMessage,
+    ErrorMessage,
+    ProtocolError,
+    ToolResultMessage,
+    model_dump,
+    parse_protocol_message,
+)
+from core.device_router import DeviceRouter
+from core.devices import DeviceRegistry
 from core.tool_contract import validate_structured_tool_args
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 app = FastAPI(title="apolov2 MCP")
+device_registry = DeviceRegistry()
+device_router = DeviceRouter(device_registry)
 
 
 class AgentWorker:
@@ -57,6 +71,7 @@ agent_worker = AgentWorker()
 class CallRequest(BaseModel):
     tool: str
     args: Dict[str, Any] = {}
+    device: str | None = None
 
 
 class VoiceCommandRequest(BaseModel):
@@ -226,8 +241,16 @@ def _update_computer_audio_guard(parsed: Dict[str, Any]) -> None:
         mark_computer_audio_for(_computer_audio_guard_seconds())
 
 
-async def execute_tool(tool: str, args: Dict[str, Any]):
+async def execute_tool(tool: str, args: Dict[str, Any], device: str | None = None):
+    args = dict(args or {})
+    device_id = device or _pop_device_id(args)
     validate_structured_tool_args(tool, args)
+
+    if device_id:
+        return await device_router.execute_remote(device_id, tool, args)
+
+    if tool == "system.info":
+        return local_system_info()
 
     if tool == "web.open":
         from core.web_shortcuts import open_web_target
@@ -319,6 +342,88 @@ async def execute_tool(tool: str, args: Dict[str, Any]):
     raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
 
 
+def _pop_device_id(args: Dict[str, Any]) -> str | None:
+    for key in ("device", "_device"):
+        value = args.pop(key, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def local_system_info() -> Dict[str, Any]:
+    import platform
+    import socket
+
+    return {
+        "ok": True,
+        "hostname": socket.gethostname(),
+        "platform": platform.system().lower(),
+        "architecture": platform.machine(),
+    }
+
+
+@app.websocket("/ws/runtime")
+async def runtime_websocket(websocket: WebSocket):
+    await websocket.accept()
+    device_id: str | None = None
+    try:
+        first = parse_protocol_message(await websocket.receive_json())
+        if not isinstance(first, DeviceRegisterMessage):
+            await _send_protocol_error(websocket, getattr(first, "request_id", ""), "runtime must register first")
+            await websocket.close(code=1008)
+            return
+        device = device_registry.register(
+            id=first.device.id,
+            name=first.device.name,
+            platform=first.device.platform,
+            capabilities=first.device.capabilities,
+        )
+        device_id = device.id
+        device_router.attach(device_id, websocket)
+        await websocket.send_json(
+            model_dump(DeviceRegisteredMessage(request_id=first.request_id, device_id=device_id))
+        )
+        while True:
+            message = parse_protocol_message(await websocket.receive_json())
+            if isinstance(message, DeviceHeartbeatMessage):
+                device_registry.mark_seen(device_id)
+            elif isinstance(message, DeviceRegisterMessage):
+                device_registry.register(
+                    id=message.device.id,
+                    name=message.device.name,
+                    platform=message.device.platform,
+                    capabilities=message.device.capabilities,
+                )
+                if message.device.id != device_id:
+                    device_router.detach(device_id)
+                    device_id = message.device.id
+                    device_router.attach(device_id, websocket)
+                await websocket.send_json(
+                    model_dump(DeviceRegisteredMessage(request_id=message.request_id, device_id=device_id))
+                )
+            elif isinstance(message, ToolResultMessage):
+                device_router.complete_result(device_id, message)
+            else:
+                await _send_protocol_error(websocket, message.request_id, f"unexpected message: {message.type}")
+    except WebSocketDisconnect:
+        pass
+    except ProtocolError as error:
+        try:
+            await _send_protocol_error(websocket, "", str(error))
+            await websocket.close(code=1008)
+        except Exception:
+            pass
+    finally:
+        if device_id:
+            device_router.detach(device_id)
+
+
+async def _send_protocol_error(websocket: WebSocket, request_id: str, error: str) -> None:
+    await websocket.send_json(
+        model_dump(ErrorMessage(request_id=request_id or "unknown", error=error, code="protocol_error"))
+    )
+
+
 @app.get("/voice", response_class=HTMLResponse)
 async def voice_page():
     from mcp.voice_page import VOICE_PAGE_HTML
@@ -328,6 +433,9 @@ async def voice_page():
 
 @app.post("/voice-command")
 async def voice_command(req: VoiceCommandRequest):
+    started_at = time.monotonic()
+    parsed: Dict[str, Any] | None = None
+    response: Dict[str, Any] | None = None
     try:
         from core.state import State
         from voice.gateway import VoiceGateway
@@ -341,22 +449,146 @@ async def voice_command(req: VoiceCommandRequest):
             response_text = repeat_response_text(parsed)
             if not req.dry_run:
                 schedule_speech(response_text)
-            return {**parsed, "response": response_text}
+            response = {**parsed, "response": response_text}
+            return response
         if parsed.get("kind") in {"ignore", "session"}:
-            return parsed
+            response = parsed
+            return response
         if req.dry_run:
-            return {"ok": True, "heard": req.text, "parsed": parsed}
+            response = {"ok": True, "heard": req.text, "parsed": parsed}
+            return response
         if parsed.get("kind") == "local":
-            return await handle_local_path(req.text, parsed)
+            response = await handle_local_path(req.text, parsed)
+            return response
         if parsed.get("kind") == "memory":
-            return await handle_memory_path(req.text, parsed)
+            response = await handle_memory_path(req.text, parsed)
+            return response
         if parsed.get("kind") == "status":
-            return await handle_status_path(req.text, parsed)
+            response = await handle_status_path(req.text, parsed)
+            return response
         if parsed.get("kind") == "codex":
-            return await handle_codex_path(req.text, parsed)
-        return await handle_tool_path(req.text, parsed)
+            response = await handle_codex_path(req.text, parsed)
+            return response
+        response = await handle_tool_path(req.text, parsed)
+        return response
     except Exception as e:
-        return error_response(e)
+        response = error_response(e)
+        return response
+    finally:
+        if not req.dry_run:
+            _record_voice_interaction(
+                req.text,
+                parsed,
+                response,
+                latency_ms=int((time.monotonic() - started_at) * 1000),
+            )
+
+
+def _record_voice_interaction(
+    heard: str,
+    parsed: Dict[str, Any] | None,
+    response: Dict[str, Any] | None,
+    latency_ms: int,
+) -> None:
+    try:
+        from core.logging import write_voice_interaction
+
+        parsed = parsed or {}
+        response = response or {}
+        interpretation = parsed.get("interpretation") if isinstance(parsed.get("interpretation"), dict) else {}
+        result = response.get("result") if isinstance(response.get("result"), dict) else {}
+        write_voice_interaction(
+            heard=heard,
+            expected_intent=None,
+            detected_intent=interpretation.get("intent"),
+            expected_action=None,
+            detected_action=_detected_action(parsed),
+            executed_action=_executed_action(parsed, response),
+            latency_ms=latency_ms,
+            source=_voice_interaction_source(parsed, response, interpretation),
+            success=_voice_interaction_success(parsed, response),
+            false_positive=None,
+            needed_repeat=_voice_interaction_needed_repeat(parsed, response, result),
+        )
+    except Exception as error:
+        print(f"Voice interaction metrics error: {error}", flush=True)
+
+
+def _detected_action(parsed: Dict[str, Any]) -> str | None:
+    tool = str(parsed.get("tool") or "").strip()
+    if tool:
+        return tool
+    command = str(parsed.get("command") or "").strip()
+    kind = str(parsed.get("kind") or "").strip()
+    if kind in {"local", "memory", "status", "codex"} and command:
+        return command
+    return None
+
+
+def _executed_action(parsed: Dict[str, Any], response: Dict[str, Any]) -> str | list[str] | None:
+    execution = response.get("execution") if isinstance(response.get("execution"), dict) else {}
+    observations = execution.get("observations") if isinstance(execution.get("observations"), list) else []
+    tools = [
+        str(observation.get("tool") or "").strip()
+        for observation in observations
+        if isinstance(observation, dict) and str(observation.get("tool") or "").strip()
+    ]
+    if tools:
+        return tools
+    codex = response.get("codex") if isinstance(response.get("codex"), dict) else {}
+    codex_parsed = codex.get("parsed") if isinstance(codex.get("parsed"), dict) else {}
+    codex_tool = str(codex_parsed.get("tool") or "").strip()
+    if response.get("result") is not None and codex_tool:
+        return codex_tool
+    if response.get("result") is not None:
+        return _detected_action(parsed)
+    if parsed.get("kind") in {"local", "memory", "status"}:
+        return _detected_action(parsed)
+    return None
+
+
+def _voice_interaction_source(
+    parsed: Dict[str, Any],
+    response: Dict[str, Any],
+    interpretation: Dict[str, Any],
+) -> str | None:
+    kind = str(parsed.get("kind") or response.get("kind") or "").strip()
+    if kind == "codex":
+        return "codex"
+    source = str(interpretation.get("source") or kind or "").strip()
+    if source == "asr_fuzzy":
+        return "fuzzy"
+    if source == "asr_phonetic":
+        return "phonetic"
+    return source or None
+
+
+def _voice_interaction_success(parsed: Dict[str, Any], response: Dict[str, Any]) -> bool:
+    if response.get("ok") is False:
+        return False
+    if parsed.get("kind") in {"ignore", "repeat"}:
+        return False
+    execution = response.get("execution") if isinstance(response.get("execution"), dict) else {}
+    if execution:
+        return bool(execution.get("verified"))
+    result = response.get("result") if isinstance(response.get("result"), dict) else {}
+    if result:
+        return result.get("ok") is not False
+    return bool(response.get("ok", True))
+
+
+def _voice_interaction_needed_repeat(
+    parsed: Dict[str, Any],
+    response: Dict[str, Any],
+    result: Dict[str, Any],
+) -> bool:
+    if parsed.get("kind") == "repeat":
+        return True
+    if response.get("feedback") == "repeat":
+        return True
+    if result.get("ok") is False:
+        return True
+    return False
 
 
 async def handle_codex_path(heard: str, parsed: Dict[str, Any]):
@@ -709,7 +941,7 @@ async def call(req: CallRequest):
         if not req.tool:
             raise HTTPException(status_code=400, detail="tool is required")
 
-        result = await execute_tool(req.tool, req.args)
+        result = await execute_tool(req.tool, req.args, device=req.device)
         return {"ok": True, "result": result}
     except Exception as e:
         return error_response(e)
@@ -850,4 +1082,4 @@ def remember_codex_route(state, command: str, codex_result: Dict[str, Any], elap
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host=core_host(), port=core_port())

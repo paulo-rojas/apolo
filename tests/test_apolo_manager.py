@@ -194,3 +194,30 @@ def test_voice_listener_command_can_use_realtime_stt(tmp_path, monkeypatch):
     command = _voice_listener_command("http://127.0.0.1:8000", "open", "ctrl+space")
 
     assert command[command.index("--transcriber") + 1] == "realtime-stt"
+
+
+def test_manager_backend_uses_core_config(tmp_path, monkeypatch):
+    import manager.apolo_manager as module
+
+    config = tmp_path / "apolo.json"
+    config.write_text('{"core":{"host":"0.0.0.0","port":8010}}', encoding="utf-8")
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(config))
+
+    calls = []
+
+    class FakeProcess:
+        stdout = None
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(module.ApoloManager, "_port_is_open", staticmethod(lambda host, port: False))
+    monkeypatch.setattr(module.ApoloManager, "_wait_for_port", lambda self, host, port, timeout_seconds: calls.append((host, port)) or True)
+    monkeypatch.setattr(module.subprocess, "Popen", lambda command, **kwargs: calls.append(command) or FakeProcess())
+
+    manager = module.ApoloManager(manage_backend=True)
+    manager._start_backend()
+
+    assert calls[0][calls[0].index("--host") + 1] == "0.0.0.0"
+    assert calls[0][calls[0].index("--port") + 1] == "8010"
+    assert calls[1] == ("0.0.0.0", 8010)

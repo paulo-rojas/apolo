@@ -177,4 +177,113 @@ Funciones mínimas para lanzar `apolo` y validar la idea con coste cero:
 
 Fin de Fase 0
 
+## Fase 1: Desacoplamiento inicial Core/Runtime
+
+Apolo empieza a separarse en tres piezas sin cambiar el comportamiento visible actual:
+
+- **Apolo Core**: sigue siendo el proceso Python. Interpreta lenguaje natural, maneja Voice Gateway, memoria, routing, planificación, integración con Codex y decide si una acción se ejecuta localmente o en un dispositivo remoto.
+- **Apolo Runtime**: proceso separado, inicialmente Rust, que corre en cada dispositivo conectado. Solo se identifica, anuncia capabilities, valida permisos, ejecuta acciones locales permitidas y devuelve resultados.
+- **Apolo Protocol**: contrato JSON sobre WebSocket entre Core y Runtime. La primera versión es `0.1`.
+- **Apolo Node**: cualquier dispositivo que ejecute Apolo Runtime.
+
+```text
+                  APOLO CORE
+                    Python
+                      |
+              Apolo Protocol
+                 WebSocket
+                      |
+          +-----------+-----------+
+          |           |           |
+      Runtime      Runtime     Runtime
+      Windows      Linux       Android
+```
+
+### Configuración del Core
+
+Las direcciones locales del Core están centralizadas en `core`:
+
+```json
+{
+  "core": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "url": "http://127.0.0.1:8000"
+  }
+}
+```
+
+Los defaults conservan el modo localhost actual. También existen variables de entorno:
+
+- `APOLO_CORE_HOST`
+- `APOLO_CORE_PORT`
+- `APOLO_CORE_URL`
+
+### Device Registry
+
+`DeviceRegistry` mantiene en memoria los dispositivos conectados:
+
+- `id`
+- `name`
+- `platform`
+- `capabilities`
+- `connected`
+- `last_seen`
+
+La abstracción vive fuera de FastAPI para poder probarla sin levantar el servidor.
+
+### Apolo Protocol v0.1
+
+Todos los mensajes incluyen:
+
+```json
+{
+  "protocol_version": "0.1",
+  "type": "...",
+  "request_id": "..."
+}
+```
+
+Tipos iniciales:
+
+- `hello`
+- `device.register`
+- `device.registered`
+- `device.heartbeat`
+- `tool.execute`
+- `tool.result`
+- `error`
+
+El Core expone `/ws/runtime` para conexiones Runtime en LAN/localhost. La conexión debe iniciar con `device.register`; después acepta heartbeats y resultados de herramientas. Al cerrar la conexión, el dispositivo queda marcado como desconectado.
+
+### Device Router
+
+`DeviceRouter` conserva el flujo local como fallback:
+
+```text
+si no se especifica device:
+    ejecutar como antes
+
+si se especifica device:
+    comprobar capability
+    enviar tool.execute al Runtime
+    esperar tool.result
+```
+
+Por ahora ninguna herramienta existente fue migrada a Rust. La ejecución distribuida es una capacidad adicional.
+
+### Runtime Rust inicial
+
+El directorio `runtime/` contiene un proyecto Rust independiente que:
+
+- detecta hostname, sistema operativo y arquitectura;
+- se conecta a `ws://127.0.0.1:8000/ws/runtime` por defecto;
+- registra el dispositivo con capabilities explícitas;
+- envía heartbeats;
+- valida una whitelist;
+- ejecuta inicialmente `system.info`, `system.open_app` y `system.close_app`;
+- reconecta si pierde la conexión.
+
+No implementa navegador, Playwright, filesystem, mouse, teclado, audio, micrófono, YouTube Music ni shell arbitrario.
+
 Hecho: este documento cubre los puntos requeridos 1→10. Si estás de acuerdo con esta propuesta, procederé a la Fase 1 (implementación del navegador) y crearé los artefactos iniciales.

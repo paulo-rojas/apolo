@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import contextmanager
+import json
 import time
 
 import pytest
@@ -179,6 +180,15 @@ def test_execute_tool_can_open_system_app(monkeypatch):
     assert result == {"ok": True, "app": "editor"}
 
 
+def test_execute_tool_can_use_local_system_info():
+    import mcp.server as server
+
+    result = asyncio.run(server.execute_tool("system.info", {}))
+
+    assert result["ok"] is True
+    assert result["hostname"]
+
+
 def test_execute_tool_can_close_system_app(monkeypatch):
     import mcp.server as server
 
@@ -187,6 +197,37 @@ def test_execute_tool_can_close_system_app(monkeypatch):
     result = asyncio.run(server.execute_tool("system.close_app", {"name": "editor"}))
 
     assert result == {"ok": True, "app": "editor", "closed": 1}
+
+
+def test_execute_tool_can_select_explicit_runtime(monkeypatch):
+    import mcp.server as server
+
+    calls = []
+
+    async def fake_remote(device_id, tool, args):
+        calls.append((device_id, tool, args))
+        return {"ok": True, "remote": device_id}
+
+    monkeypatch.setattr(server.device_router, "execute_remote", fake_remote)
+
+    result = asyncio.run(server.execute_tool("system.info", {"device": "node-1"}))
+
+    assert result == {"ok": True, "remote": "node-1"}
+    assert calls == [("node-1", "system.info", {})]
+
+
+def test_execute_tool_without_device_keeps_local_fallback(monkeypatch):
+    import mcp.server as server
+
+    async def fake_remote(*_args, **_kwargs):
+        raise AssertionError("remote router should not be used without device")
+
+    monkeypatch.setattr(server.device_router, "execute_remote", fake_remote)
+    monkeypatch.setattr("core.system_apps.open_system_app", lambda name: {"ok": True, "app": name})
+
+    result = asyncio.run(server.execute_tool("system.open_app", {"name": "editor"}))
+
+    assert result == {"ok": True, "app": "editor"}
 
 
 def test_execute_tool_can_set_system_volume(monkeypatch):
@@ -955,3 +996,67 @@ def test_handle_local_shutdown_sets_shutdown_flag(tmp_path, monkeypatch):
 
     assert result["response"] == "Nos vemos luego"
     assert control.shutdown_requested() is True
+
+
+def test_voice_command_records_interaction_metrics(tmp_path, monkeypatch):
+    import mcp.server as server
+
+    config = tmp_path / "config.json"
+    logs_dir = tmp_path / "logs"
+    config.write_text(json.dumps({"logs": {"dir": str(logs_dir)}}), encoding="utf-8")
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(config))
+    monkeypatch.setattr(server, "schedule_speech", lambda text: None)
+
+    result = asyncio.run(
+        server.voice_command(
+            server.VoiceCommandRequest(
+                text="Hola, por lo muchas",
+                confidence=0.9,
+                duration_ms=900,
+            )
+        )
+    )
+
+    assert result["kind"] == "repeat"
+    rows = [
+        json.loads(line)
+        for line in (logs_dir / "voice_interactions.ndjson").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["heard"] == "Hola, por lo muchas"
+    assert row["expected_intent"] is None
+    assert row["detected_intent"] is None
+    assert row["expected_action"] is None
+    assert row["detected_action"] is None
+    assert isinstance(row["latency_ms"], int)
+    assert row["source"] == "repeat"
+    assert row["success"] is False
+    assert row["false_positive"] is None
+    assert row["needed_repeat"] is True
+
+
+def test_voice_interaction_derives_executed_goal_actions():
+    import mcp.server as server
+
+    parsed = {
+        "kind": "mcp",
+        "tool": "youtube_music.play",
+        "interpretation": {"intent": "play_music", "source": "phonetic"},
+    }
+    response = {
+        "ok": True,
+        "execution": {
+            "verified": True,
+            "observations": [
+                {"tool": "browser.ensure_cdp", "ok": True},
+                {"tool": "youtube_music.play", "ok": True},
+            ],
+        },
+        "result": {"ok": True},
+    }
+
+    assert server._detected_action(parsed) == "youtube_music.play"
+    assert server._executed_action(parsed, response) == ["browser.ensure_cdp", "youtube_music.play"]
+    assert server._voice_interaction_success(parsed, response) is True
+    assert server._voice_interaction_needed_repeat(parsed, response, response["result"]) is False

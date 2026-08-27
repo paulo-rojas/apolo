@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 
 from core.audio_gate import listener_is_muted
-from core.config import PROJECT_ROOT, get_bool, get_float, get_int, get_str
+from core.config import PROJECT_ROOT, core_url, get_bool, get_float, get_int, get_str
 from core.listener_control import listener_is_resting, shutdown_requested
 from core.logging import write_log
 from core.memory_files import memory_dir
@@ -38,7 +38,7 @@ def main():
         pass
 
     parser = argparse.ArgumentParser(description="Record one voice command and send it to Apolo.")
-    parser.add_argument("--server", default="http://127.0.0.1:8000")
+    parser.add_argument("--server", default=core_url())
     parser.add_argument("--language", default=get_str("whisper.language", "es"))
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--continuous", action="store_true")

@@ -13,7 +13,12 @@ apolo_screenshot.png
 apolo_click_error.png
 ytmusic_*.png
 uvicorn.*.log
-runtime/
+runtime/*
+!runtime/Cargo.toml
+!runtime/src/
+!runtime/src/**
+runtime/browser-profile/
+runtime/target/
 
 config/apolo.json
 

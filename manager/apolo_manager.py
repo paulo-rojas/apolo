@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from core.config import get_float, get_str
+from core.config import core_host, core_port, core_url, get_float, get_str
 from core.logging import write_log
 from core.process import hidden_subprocess_kwargs
 from .audio_monitor import AudioMonitor
@@ -188,11 +188,13 @@ class ApoloManager:
     def _start_backend(self) -> None:
         if not self._manage_backend:
             return
-        if self._port_is_open(8000):
+        host = core_host()
+        port = core_port()
+        if self._port_is_open(host, port):
             self.set_service_status("Codex", ServiceState.READY, "Backend MCP activo")
             return
         self._backend_process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "mcp.server:app", "--host", "127.0.0.1", "--port", "8000"],
+            [sys.executable, "-m", "uvicorn", "mcp.server:app", "--host", host, "--port", str(port)],
             cwd=Path(__file__).resolve().parents[1],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -202,7 +204,7 @@ class ApoloManager:
             **hidden_subprocess_kwargs(),
         )
         self._pipe_process_logs("MCP", self._backend_process)
-        if self._wait_for_port(8000, timeout_seconds=5):
+        if self._wait_for_port(host, port, timeout_seconds=5):
             self.set_service_status("Codex", ServiceState.READY, "Backend MCP activo")
         else:
             self.set_service_status("Codex", ServiceState.ERROR, "Backend MCP sin respuesta")
@@ -225,7 +227,7 @@ class ApoloManager:
         mode = get_str("voice.mode", "open") or "open"
         hotkey = get_str("voice.hotkey", "ctrl+space") or "ctrl+space"
         self._voice_process = subprocess.Popen(
-            _voice_listener_command("http://127.0.0.1:8000", mode, hotkey),
+            _voice_listener_command(core_url(), mode, hotkey),
             cwd=root,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -251,15 +253,15 @@ class ApoloManager:
         self.set_service_status("Voz", ServiceState.STOPPED, "Listener detenido")
 
     @staticmethod
-    def _port_is_open(port: int) -> bool:
+    def _port_is_open(host: str, port: int) -> bool:
         with socket.socket() as connection:
             connection.settimeout(0.15)
-            return connection.connect_ex(("127.0.0.1", port)) == 0
+            return connection.connect_ex((host, port)) == 0
 
-    def _wait_for_port(self, port: int, timeout_seconds: float) -> bool:
+    def _wait_for_port(self, host: str, port: int, timeout_seconds: float) -> bool:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            if self._port_is_open(port):
+            if self._port_is_open(host, port):
                 return True
             time.sleep(0.1)
         return False
