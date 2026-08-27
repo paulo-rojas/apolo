@@ -46,6 +46,24 @@ Edita ahí rutas de navegador, `whisper.cpp`, modelo, timeouts, VAD y sesión de
 Por seguridad, Apolo usa un perfil de navegador aislado y solo inicia o conecta
 Playwright cuando va a ejecutar una herramienta. No controla tu navegador personal
 en segundo plano.
+
+El Core HTTP/WebSocket se configura en la clave `core`. Si no defines nada,
+Apolo conserva el modo local histórico:
+
+```json
+{
+  "core": {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "url": "http://127.0.0.1:8000"
+  }
+}
+```
+
+`ApoloManager`, el servidor MCP y `voice.local_listener` leen esos valores. Esto
+permite mover el Core a otro host o puerto sin cambiar lógica de negocio. También
+puedes usar `APOLO_CORE_HOST`, `APOLO_CORE_PORT` y `APOLO_CORE_URL`.
+
 También puedes habilitar Codex CLI como cerebro bajo demanda:
 
 ```json
@@ -148,6 +166,121 @@ Desde la raíz canónica:
 cd C:\apolo
 python -m uvicorn mcp.server:app --host 127.0.0.1 --port 8000
 ```
+
+Si cambiaste `core.host` o `core.port`, usa esos mismos valores al arrancar el
+servidor. La interfaz de escritorio los toma automáticamente desde
+`config/apolo.json`.
+
+## Apolo Core, Runtime y Protocol
+
+Apolo mantiene el flujo local actual y suma una ruta distribuida opcional:
+
+```text
+microfono -> STT -> Voice Gateway -> MCP -> herramienta local
+
+Voice Gateway -> Apolo Core -> DeviceRouter -> Apolo Runtime -> herramienta remota
+```
+
+- **Apolo Core** vive en Python. Interpreta lenguaje natural, enruta herramientas,
+  usa memoria/Codex y decide si una acción se ejecuta localmente o en un Runtime.
+- **Apolo Runtime** vive en `runtime/` como proyecto Rust independiente. Corre en
+  un dispositivo, anuncia capabilities, valida permisos y ejecuta acciones locales
+  permitidas.
+- **Apolo Protocol** es JSON sobre WebSocket con `protocol_version: "0.1"`.
+- **Apolo Node** es cualquier dispositivo que ejecuta Apolo Runtime.
+
+Diagrama:
+
+```text
+                  APOLO CORE
+                    Python
+                      |
+              Apolo Protocol
+                 WebSocket
+                      |
+          +-----------+-----------+
+          |           |           |
+      Runtime      Runtime     Runtime
+      Windows      Linux       Android
+```
+
+El Core expone el WebSocket `/ws/runtime` solo para Runtimes. La primera versión
+espera que el Runtime envíe `device.register`, después acepta
+`device.heartbeat` y correlaciona `tool.result` usando `request_id`.
+
+Mensajes iniciales del protocolo:
+
+```text
+hello
+device.register
+device.registered
+device.heartbeat
+tool.execute
+tool.result
+error
+```
+
+Ejemplo de registro:
+
+```json
+{
+  "protocol_version": "0.1",
+  "type": "device.register",
+  "request_id": "uuid",
+  "device": {
+    "id": "laptop-paulo",
+    "name": "Laptop",
+    "platform": "windows",
+    "capabilities": ["system.info"]
+  }
+}
+```
+
+Ejemplo de ejecución remota:
+
+```json
+{
+  "tool": "system.info",
+  "device": "laptop-paulo",
+  "args": {}
+}
+```
+
+Sin `device`, `execute_tool(...)` usa exactamente el fallback local existente.
+
+## Ejecutar Apolo Runtime
+
+El Runtime inicial está en Rust:
+
+```powershell
+cd C:\apolo\runtime
+cargo run
+```
+
+Por defecto se conecta a:
+
+```text
+ws://127.0.0.1:8000/ws/runtime
+```
+
+Para apuntarlo a otro Core:
+
+```powershell
+$env:APOLO_CORE_WS_URL = "ws://192.168.1.20:8000/ws/runtime"
+cargo run
+```
+
+La primera versión implementa una whitelist explícita:
+
+```text
+system.info
+system.open_app
+system.close_app
+```
+
+No implementa shell arbitrario, filesystem, navegador, Playwright, mouse,
+teclado, audio, micrófono ni YouTube Music. Es intencional: el Runtime no
+interpreta lenguaje natural ni toma decisiones inteligentes.
 
 ## Ejecutar la interfaz de escritorio
 
@@ -311,6 +444,19 @@ python -m pytest -q
 ```
 
 Los tests del navegador se omiten si `playwright` no está instalado. Para ejecutarlos con navegador real, instala Chromium con `python -m playwright install chromium`.
+
+Los tests nuevos cubren registro de dispositivos, actualización de capabilities,
+desconexión, validación de protocolo, mensajes inválidos, capability inexistente,
+correlación de `request_id`, fallback local, selección explícita de Runtime y
+desconexión durante ejecución.
+
+Para validar el Runtime Rust necesitas tener instalado el toolchain de Rust:
+
+```powershell
+cd C:\apolo\runtime
+cargo fmt --check
+cargo test
+```
 
 ## Música
 

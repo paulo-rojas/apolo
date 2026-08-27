@@ -286,4 +286,22 @@ El directorio `runtime/` contiene un proyecto Rust independiente que:
 
 No implementa navegador, Playwright, filesystem, mouse, teclado, audio, micrófono, YouTube Music ni shell arbitrario.
 
-Hecho: este documento cubre los puntos requeridos 1→10. Si estás de acuerdo con esta propuesta, procederé a la Fase 1 (implementación del navegador) y crearé los artefactos iniciales.
+### Estado de la implementación
+
+Esta fase deja listo el recorrido mínimo:
+
+```text
+Apolo Core Python
+       |
+WebSocket
+       |
+Apolo Runtime Rust
+       |
+system.info
+       |
+respuesta al Core
+```
+
+Queda pendiente validar el Runtime con `cargo fmt` y `cargo test` en una máquina
+con toolchain de Rust instalado, y después ampliar capacidades de forma
+incremental sin migrar las herramientas Python existentes.
