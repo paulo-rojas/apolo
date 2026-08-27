@@ -457,6 +457,10 @@ async def handle_tool_path(heard: str, parsed: Dict[str, Any]):
                     schedule_speech(response_text)
                     response["feedback"] = "unavailable"
                     response["response"] = response_text
+        response_text = tool_success_feedback(parsed, result) if not response.get("response") else ""
+        if response_text:
+            schedule_speech(response_text)
+            response["response"] = response_text
         return response
     except Exception as error:
         response_text = tool_error_feedback(parsed, error)
@@ -752,6 +756,17 @@ def tool_result_feedback(parsed: Dict[str, Any], result: Dict[str, Any]) -> str:
         return ""
     if result.get("error_type") == "SystemVolumeUnavailable":
         return volume_unavailable_feedback(parsed, str(result.get("error") or ""))
+    return ""
+
+
+def tool_success_feedback(parsed: Dict[str, Any], result: Dict[str, Any]) -> str:
+    if not isinstance(result, dict) or result.get("ok") is False:
+        return ""
+    tool = parsed.get("tool")
+    if tool == "browser.ensure_cdp":
+        if result.get("status") == "already_available":
+            return "El navegador ya se encuentra abierto."
+        return "Navegador listo."
     return ""
 
 

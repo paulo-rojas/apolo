@@ -267,6 +267,28 @@ def test_handle_tool_path_speaks_when_youtube_music_times_out(monkeypatch):
     assert spoken == ["YouTube Music tardó demasiado en responder. Reinténtalo en unos segundos."]
 
 
+def test_handle_tool_path_speaks_when_browser_is_already_open(monkeypatch):
+    import mcp.server as server
+
+    spoken = []
+
+    async def fake_execute_tool(tool, args):
+        return {"ok": True, "status": "already_available", "endpoint": "http://127.0.0.1:9222"}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(server, "schedule_speech", spoken.append)
+
+    parsed = {
+        "kind": "mcp",
+        "tool": "browser.ensure_cdp",
+        "args": {},
+    }
+    result = asyncio.run(server.handle_tool_path("Apolo abre el navegador", parsed))
+
+    assert result["response"] == "El navegador ya se encuentra abierto."
+    assert spoken == ["El navegador ya se encuentra abierto."]
+
+
 def test_agent_worker_ignores_late_result_after_timeout():
     import mcp.server as server
 
@@ -428,6 +450,33 @@ def test_handle_tool_path_executes_goal_and_records_observation(monkeypatch):
     assert result["result"] == {"ok": True, "tool": "youtube_music.pause", "args": {}}
     assert result["execution"]["verified"] is True
     assert result["execution"]["observations"][0]["ok"] is True
+
+
+def test_handle_tool_path_speaks_when_goal_browser_is_already_open(monkeypatch):
+    import mcp.server as server
+
+    spoken = []
+
+    async def fake_execute_tool(tool, args):
+        return {"ok": True, "status": "already_available", "endpoint": "http://127.0.0.1:9222"}
+
+    monkeypatch.setattr(server, "execute_tool", fake_execute_tool)
+    monkeypatch.setattr(server, "schedule_speech", spoken.append)
+
+    parsed = {
+        "kind": "mcp",
+        "tool": "browser.ensure_cdp",
+        "args": {},
+        "goal": {
+            "objective": "abre el navegador",
+            "actions": [{"tool": "browser.ensure_cdp", "args": {}}],
+        },
+    }
+    result = asyncio.run(server.handle_tool_path("Apolo abre el navegador", parsed))
+
+    assert result["execution"]["verified"] is True
+    assert result["response"] == "El navegador ya se encuentra abierto."
+    assert spoken == ["El navegador ya se encuentra abierto."]
 
 
 def test_execute_goal_marks_replan_when_verification_fails(monkeypatch):
