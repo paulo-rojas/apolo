@@ -221,6 +221,18 @@ def test_short_asr_variants_use_fuzzy_intent_matching():
     assert siguiente["interpretation"]["source"] == "asr_fuzzy"
 
 
+def test_short_asr_variants_fall_back_to_phonetic_matching():
+    siguiente = route_command("cigiente").as_dict()
+    anterior = route_command("prebius").as_dict()
+
+    assert siguiente["tool"] == "youtube_music.next"
+    assert siguiente["interpretation"]["normalized_text"] == "siguiente"
+    assert siguiente["interpretation"]["source"] == "asr_phonetic"
+    assert anterior["tool"] == "youtube_music.previous"
+    assert anterior["interpretation"]["normalized_text"] == "previous"
+    assert anterior["interpretation"]["source"] == "asr_phonetic"
+
+
 def test_short_alias_matching_comes_from_intent_registry():
     registry = IntentRegistry(
         [
@@ -246,12 +258,15 @@ def test_short_alias_matching_comes_from_intent_registry():
 def test_fuzzy_matching_rejects_long_or_ambiguous_phrases():
     long_phrase = route_command("continua revisando la implementacion antes de tocar youtube").as_dict()
     negated = route_command("no pausa").as_dict()
+    phonetic_negated = route_command("no cigiente").as_dict()
     ambiguous = route_command("otra anterior").as_dict()
 
     assert long_phrase["tool"] == ""
     assert long_phrase["kind"] in {"codex", "ignore"}
     assert negated["tool"] == ""
     assert negated["kind"] in {"codex", "ignore"}
+    assert phonetic_negated["tool"] == ""
+    assert phonetic_negated["kind"] in {"codex", "ignore"}
     assert ambiguous["tool"] == ""
     assert ambiguous["kind"] in {"codex", "ignore"}
 

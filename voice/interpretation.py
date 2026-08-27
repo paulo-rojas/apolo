@@ -358,7 +358,7 @@ class DeterministicIntentResolver:
             return InterpretedCommand(raw_text, normalized_text, intent, entities, confidence, source="alias")
         fuzzy = _short_command_alias_match(normalized_text, controls)
         if fuzzy:
-            alias, intent, confidence = fuzzy
+            alias, intent, confidence, source = fuzzy
             entities = {"variant": alias} if alias in {"esa no", "otra"} else {}
             tree = _semantic_tree_from_command(intent, alias, entities)
             return InterpretedCommand(
@@ -367,7 +367,7 @@ class DeterministicIntentResolver:
                 intent,
                 entities,
                 confidence,
-                source="asr_fuzzy",
+                source=source,
                 semantic_tree=tree,
                 reason=f"matched short command alias from {normalized_text}",
             )
@@ -787,7 +787,7 @@ def _parse_volume_level(text: str) -> Optional[int]:
     return number_words.get(value)
 
 
-def _short_command_alias_match(normalized_text: str, controls: Dict[str, tuple[str, float]]) -> Optional[tuple[str, str, float]]:
+def _short_command_alias_match(normalized_text: str, controls: Dict[str, tuple[str, float]]) -> Optional[tuple[str, str, float, str]]:
     if len(normalized_text) > 28 or len(normalized_text.split()) > 4:
         return None
     candidates: list[tuple[str, str, float, float]] = []
@@ -801,11 +801,70 @@ def _short_command_alias_match(normalized_text: str, controls: Dict[str, tuple[s
             continue
         candidates.append((alias, intent, min(base_confidence, 0.9), score))
     if not candidates:
-        return None
+        return _short_command_phonetic_match(normalized_text, controls)
     candidates.sort(key=lambda item: item[3], reverse=True)
     if len(candidates) > 1 and candidates[0][3] - candidates[1][3] < 0.08:
         return None
-    return candidates[0][:3]
+    alias, intent, confidence, _score = candidates[0]
+    return alias, intent, confidence, "asr_fuzzy"
+
+
+def _short_command_phonetic_match(normalized_text: str, controls: Dict[str, tuple[str, float]]) -> Optional[tuple[str, str, float, str]]:
+    text_key = _spanish_phonetic_key(normalized_text)
+    if len(text_key) < 4:
+        return None
+    candidates: list[tuple[str, str, float, float]] = []
+    for alias, (intent, base_confidence) in controls.items():
+        if abs(len(alias) - len(normalized_text)) > 8:
+            continue
+        alias_key = _spanish_phonetic_key(alias)
+        if not alias_key:
+            continue
+        score = SequenceMatcher(None, text_key, alias_key).ratio()
+        if score < 0.88:
+            continue
+        if not _shares_command_sound_shape(normalized_text, alias):
+            continue
+        candidates.append((alias, intent, min(base_confidence, 0.87), score))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[3], reverse=True)
+    if len(candidates) > 1 and candidates[0][3] - candidates[1][3] < 0.1:
+        return None
+    alias, intent, confidence, _score = candidates[0]
+    return alias, intent, confidence, "asr_phonetic"
+
+
+def _spanish_phonetic_key(text: str) -> str:
+    tokens = []
+    for token in normalize_text(text).split():
+        token = re.sub(r"^h+", "", token)
+        token = token.replace("gue", "ge").replace("gui", "gi")
+        token = token.replace("que", "ke").replace("qui", "ki")
+        token = token.replace("ce", "se").replace("ci", "si")
+        token = token.replace("z", "s").replace("v", "b")
+        token = token.replace("ll", "y").replace("ch", "x")
+        token = token.replace("j", "g")
+        token = re.sub(r"[mn](?=[bp])", "m", token)
+        token = re.sub(r"([bcdfghjklmnñpqrstvwxyz])\1+", r"\1", token)
+        token = re.sub(r"(?<!^)[aeiou]+", "", token)
+        if token:
+            tokens.append(token)
+    return " ".join(tokens)
+
+
+def _shares_command_sound_shape(text: str, alias: str) -> bool:
+    if _shares_command_shape(text, alias):
+        return True
+    text_tokens = [_spanish_phonetic_key(token) for token in text.split()]
+    alias_tokens = [_spanish_phonetic_key(token) for token in alias.split()]
+    text_tokens = [token for token in text_tokens if token]
+    alias_tokens = [token for token in alias_tokens if token]
+    if not text_tokens or not alias_tokens:
+        return False
+    if text.split()[0] in {"no", "nunca", "sin"}:
+        return False
+    return text_tokens[0][:2] == alias_tokens[0][:2] or bool(set(text_tokens) & set(alias_tokens))
 
 
 def _shares_command_shape(text: str, alias: str) -> bool:
