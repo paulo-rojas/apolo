@@ -226,13 +226,15 @@ def test_execute_tool_rejects_raw_voice_command_args():
         asyncio.run(server.execute_tool("youtube_music.play", {"query": "Apolo pon Numb de Linkin Park"}))
 
 
-def test_music_tool_has_five_second_execution_timeout(monkeypatch, tmp_path):
+def test_music_tool_uses_music_action_timeout(monkeypatch, tmp_path):
     import mcp.server as server
 
-    monkeypatch.setenv("APOLO_CONFIG_FILE", str(tmp_path / "missing-config.json"))
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"music":{"action_timeout_seconds":1}}', encoding="utf-8")
+    monkeypatch.setenv("APOLO_CONFIG_FILE", str(config_path))
 
     async def slow_call(*args, **kwargs):
-        await asyncio.sleep(6)
+        await asyncio.sleep(2)
 
     monkeypatch.setattr(server, "run_agent_call", slow_call)
 

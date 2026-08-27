@@ -313,7 +313,7 @@ async def execute_tool(tool: str, args: Dict[str, Any]):
         method = tool.split(".", 1)[1]
         return await asyncio.wait_for(
             run_agent_call(music.call, method, args),
-            timeout=get_int("actions.timeout_seconds", 5, minimum=1),
+            timeout=get_int("music.action_timeout_seconds", 20, minimum=1),
         )
 
     raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
