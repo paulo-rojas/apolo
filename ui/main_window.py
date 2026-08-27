@@ -13,6 +13,7 @@ from ui.widgets.sidebar import Sidebar
 
 class _WindowBridge(QObject):
     shutdown_requested = Signal()
+    show_requested = Signal()
 
 
 class MainWindow(QMainWindow):
@@ -23,6 +24,7 @@ class MainWindow(QMainWindow):
         self._talking = False
         self._bridge = _WindowBridge(self)
         self._bridge.shutdown_requested.connect(self._exit)
+        self._bridge.show_requested.connect(self.show_window)
         manager.on("shutdown_requested", self._bridge.shutdown_requested.emit)
         self.setWindowTitle("apolov2")
         self.resize(900, 600)
@@ -78,7 +80,12 @@ class MainWindow(QMainWindow):
 
     def show_window(self):
         self.showNormal()
+        self.raise_()
         self.activateWindow()
+
+    def request_show(self, message: str = "show") -> None:
+        if message == "show":
+            self._bridge.show_requested.emit()
 
     def closeEvent(self, event):
         if self._exiting:

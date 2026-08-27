@@ -19,7 +19,8 @@ def main():
     if instance.already_running:
         from PySide6.QtWidgets import QMessageBox
 
-        QMessageBox.information(app.activeWindow(), "apolov2", "apolov2 ya está abierto.")
+        if not instance.notify_existing("show"):
+            QMessageBox.information(app.activeWindow(), "apolov2", "apolov2 ya está abierto.")
         return 0
     lock_path = Path(app.applicationDirPath()) / "apolo-ui.lock"
     lock = QLockFile(str(lock_path))
@@ -34,6 +35,7 @@ def main():
     cleanup_apolo_processes()
     manager = ApoloManager(manage_backend=True)
     window = MainWindow(manager)
+    instance.listen(window.request_show)
     window.show()
     manager.start()
     try:

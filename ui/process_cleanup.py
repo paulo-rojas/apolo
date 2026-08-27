@@ -7,8 +7,7 @@ import sys
 from core.process import hidden_subprocess_kwargs
 
 
-_PROCESS_PATTERN = r"(?i)C:\\apolo\\\.venv\\Scripts\\pythonw?\.exe.*(?:-m\s+(?:ui\.app|voice\.local_listener)|uvicorn\s+mcp\.server:app)"
-_PYTHON_GLOB = r"*C:\apolo\.venv\Scripts\python*.exe*"
+_PROCESS_PATTERN = r"(?i)(?:pythonw?\.exe.*(?:-m\s+(?:ui\.app|voice\.local_listener)|uvicorn\s+mcp\.server:app))"
 _SERVICE_GLOBS = (
     "*-m ui.app*",
     "*-m voice.local_listener*",
@@ -51,7 +50,7 @@ def _cleanup_command(pid: int, ppid: int) -> str:
         "$ids = Get-CimInstance Win32_Process | "
         "Where-Object { $protected -notcontains $_.ProcessId -and "
         "$null -ne $_.CommandLine -and "
-        f"$_.CommandLine -like '{_PYTHON_GLOB}' -and "
+        "$_.Name -like 'python*.exe' -and "
         f"({service_filter}) }} | "
         "Select-Object -ExpandProperty ProcessId; "
         "$ids"

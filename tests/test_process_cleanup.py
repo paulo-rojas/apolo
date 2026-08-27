@@ -21,6 +21,7 @@ def test_cleanup_pattern_matches_only_apolo_service_processes():
         r"C:\apolo\.venv\Scripts\python.exe -m voice.local_listener --continuous",
         r"C:\apolo\.venv\Scripts\python.exe -m uvicorn mcp.server:app",
         r"C:\apolo\.venv\Scripts\pythonw.exe -m uvicorn mcp.server:app --host 127.0.0.1",
+        r"C:\Users\paulo\AppData\Local\Programs\Python\Python312\pythonw.exe -m voice.local_listener --continuous",
     ]
 
     for command_line in command_lines:
@@ -32,6 +33,6 @@ def test_cleanup_command_has_balanced_script_block():
 
     assert "Where-Object {" in command
     assert "$null -ne $_.CommandLine" in command
-    assert "$_.CommandLine -like '*C:\\apolo\\.venv\\Scripts\\python*.exe*'" in command
+    assert "$_.Name -like 'python*.exe'" in command
     assert "$_.CommandLine -like '*-m ui.app*'" in command
     assert command.count("{") == command.count("}")
