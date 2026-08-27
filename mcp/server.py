@@ -388,6 +388,7 @@ async def handle_codex_path(heard: str, parsed: Dict[str, Any]):
     context = await collect_codex_context()
     started_at = time.monotonic()
     try:
+        announce_codex_handoff()
         codex_result = await run_agent_call(CodexBridge().run, command, context)
     except CodexBridgeDisabled:
         return {"ok": True, "heard": heard, "parsed": parsed, "needs_codex": True}
@@ -411,6 +412,7 @@ async def handle_codex_path(heard: str, parsed: Dict[str, Any]):
     response_text = codex_parsed.get("text") or codex_parsed.get("question")
     if response_text:
         schedule_speech(response_text)
+        response["response"] = response_text
     should_auto_execute = codex_auto_execute_tools() or str(codex_parsed.get("tool", "")).startswith("memory.")
     if should_auto_execute and codex_parsed.get("kind") == "mcp" and codex_parsed.get("tool"):
         try:
@@ -433,6 +435,12 @@ async def handle_codex_path(heard: str, parsed: Dict[str, Any]):
             response["feedback"] = "repeat"
             response["response"] = response_text
     return response
+
+
+def announce_codex_handoff() -> str:
+    response_text = "Voy a consultarlo con Codex."
+    schedule_speech(response_text)
+    return response_text
 
 
 async def handle_tool_path(heard: str, parsed: Dict[str, Any]):

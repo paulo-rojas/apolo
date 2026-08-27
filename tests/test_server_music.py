@@ -703,7 +703,38 @@ def test_handle_codex_path_speaks_when_codex_does_not_understand(monkeypatch):
     )
 
     assert result["response"] == "No entendí la instrucción."
-    assert spoken == ["No entendí la instrucción."]
+    assert spoken == ["Voy a consultarlo con Codex.", "No entendí la instrucción."]
+
+
+def test_handle_codex_path_announces_handoff_before_call(monkeypatch):
+    import mcp.server as server
+
+    spoken = []
+    calls = []
+
+    class FakeBridge:
+        def run(self, command, context):
+            calls.append(("run", list(spoken)))
+            return {"parsed": {"kind": "answer", "text": "Respuesta lista."}, "raw": "{}"}
+
+    async def fake_collect_context():
+        return {}
+
+    monkeypatch.setattr("core.codex_bridge.CodexBridge", FakeBridge)
+    monkeypatch.setattr("core.memory_files.cached_repetitive_answer", lambda command: {})
+    monkeypatch.setattr(server, "collect_codex_context", fake_collect_context)
+    monkeypatch.setattr(server, "schedule_speech", spoken.append)
+
+    result = asyncio.run(
+        server.handle_codex_path(
+            "Apolo explica arquitectura lunar",
+            {"kind": "codex", "command": "explica arquitectura lunar"},
+        )
+    )
+
+    assert calls == [("run", ["Voy a consultarlo con Codex."])]
+    assert result["response"] == "Respuesta lista."
+    assert spoken == ["Voy a consultarlo con Codex.", "Respuesta lista."]
 
 
 def test_handle_codex_path_speaks_when_auto_tool_has_empty_app_name(monkeypatch):
@@ -740,7 +771,7 @@ def test_handle_codex_path_speaks_when_auto_tool_has_empty_app_name(monkeypatch)
 
     assert result["response"] == "No entendí qué aplicación quieres abrir."
     assert result["result"] == {"ok": False, "error": "app name is empty"}
-    assert spoken == ["No entendí qué aplicación quieres abrir."]
+    assert spoken == ["Voy a consultarlo con Codex.", "No entendí qué aplicación quieres abrir."]
 
 
 def test_handle_local_rest_sets_listener_rest_flag(tmp_path, monkeypatch):
